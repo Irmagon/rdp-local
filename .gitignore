@@ -1,0 +1,7 @@
+# Dependencies (restore with `npm ci`)
+node_modules/
+
+# Runtime artifacts (auto-created next to the server/exe)
+ssl/
+dist/ssl/
+dist/config.ini
