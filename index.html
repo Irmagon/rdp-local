@@ -1260,18 +1260,21 @@ class RemoteDesktopApp {
         if (this.isConnecting) return;
         this.isConnecting = true;
         
+        this.log(`[CONNECT] Initiating connection to host: ${hostId}`, 'info');
         this.showLoading(true);
         this.sendMessage({ type: 'connect-to-host', hostId: hostId });
     }
     
     // WebRTC setup
     setupPeerConnection() {
+        this.log(`[SETUP_PC] Creating peer connection for role=${this.state.role}, localStream=${!!this.connection.localStream}`, 'info');
         this.connection.pc = new RTCPeerConnection({
             iceServers: this.config.iceServers
         });
         
         this.connection.pc.onicecandidate = (event) => {
             if (event.candidate) {
+                this.log(`[SETUP_PC] Sending ICE candidate: ${event.candidate.candidate}`, 'info');
                 this.sendMessage({
                     type: 'ice-candidate',
                     candidate: event.candidate
@@ -1280,6 +1283,7 @@ class RemoteDesktopApp {
         };
         
         this.connection.pc.ontrack = (event) => {
+            this.log(`[SETUP_PC] ontrack: streams=${event.streams?.length}, track=${event.track?.kind}`, 'info');
             if (event.streams && event.streams[0]) {
                 this.handleRemoteStream(event.streams[0]);
             }
@@ -1302,6 +1306,7 @@ class RemoteDesktopApp {
         
         // Add local stream if host
         if (this.state.role === 'host' && this.connection.localStream) {
+            this.log(`[SETUP_PC] Adding local stream tracks`, 'info');
             this.connection.localStream.getTracks().forEach(track => {
                 this.connection.pc.addTrack(track, this.connection.localStream);
             });
@@ -1326,9 +1331,11 @@ class RemoteDesktopApp {
     
     async createOffer() {
         try {
+            this.log(`[CREATE_OFFER] Creating offer for peer ${this.connectedPeerId}`, 'info');
             const offer = await this.connection.pc.createOffer();
             await this.connection.pc.setLocalDescription(offer);
             
+            this.log(`[CREATE_OFFER] Sending offer to ${this.connectedPeerId}`, 'info');
             this.sendMessage({ 
                 type: 'offer', 
                 offer: offer,
@@ -1341,13 +1348,17 @@ class RemoteDesktopApp {
     
     async handleOffer(data) {
         try {
-            this.log(`Received offer from ${data.fromId}`, 'info');
+            this.log(`[CLIENT] handleOffer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, pcState=${this.connection.pc?.connectionState}`, 'info');
             this.connectedPeerId = data.fromId;
             
             await this.connection.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            this.log(`[CLIENT] Set remote description (offer)`, 'info');
+            
             const answer = await this.connection.pc.createAnswer();
             await this.connection.pc.setLocalDescription(answer);
+            this.log(`[CLIENT] Created and set local description (answer)`, 'info');
             
+            this.log(`[CLIENT] Sending answer to ${data.fromId}`, 'info');
             this.sendMessage({ 
                 type: 'answer', 
                 answer: answer,
@@ -1362,7 +1373,9 @@ class RemoteDesktopApp {
     
     async handleAnswer(data) {
         try {
+            this.log(`[HOST] handleAnswer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}`, 'info');
             await this.connection.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            this.log(`[HOST] Set remote description (answer)`, 'info');
         } catch (error) {
             this.log(`Handle answer error: ${error}`, 'error');
         }
@@ -1370,13 +1383,19 @@ class RemoteDesktopApp {
     
     async handleIceCandidate(data) {
         try {
+            this.log(`[ICE] Received candidate from ${data.fromId}: ${data.candidate?.candidate?.substring(0, 50)}...`, 'info');
             await this.connection.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            this.log(`[ICE] Added candidate`, 'info');
         } catch (error) {
             this.log(`Handle ICE candidate error: ${error}`, 'error');
         }
     }
     
     handleRemoteStream(stream) {
+        this.log(`[REMOTE_STREAM] Received stream: id=${stream.id}, tracks=${stream.getTracks().length}`, 'info');
+        stream.getTracks().forEach((t, i) => {
+            this.log(`[REMOTE_STREAM] Track ${i}: kind=${t.kind}, enabled=${t.enabled}, readyState=${t.readyState}`, 'info');
+        });
         this.connection.remoteStream = stream;
         const remoteVideo = document.getElementById('remoteVideo');
         remoteVideo.srcObject = stream;
@@ -1880,17 +1899,18 @@ class RemoteDesktopApp {
     
     // Handle host available (when client connects to a host)
     handleHostAvailable(data) {
-        this.log(`Connected to host: ${data.hostId}`, 'info');
+        this.log(`[CLIENT] handleHostAvailable: hostId=${data.hostId}, role=${this.state.role}, streaming=${this.state.streaming}`, 'info');
         this.connectedPeerId = data.hostId;
         this.setupPeerConnection();
     }
     
     // Handle client joined (when a client connects to the host)
     handleClientJoined(data) {
-        this.log(`Client ${data.clientId} connected`, 'info');
+        this.log(`[HOST] handleClientJoined: clientId=${data.clientId}, role=${this.state.role}, streaming=${this.state.streaming}, pcExists=${!!this.connection.pc}`, 'info');
         this.connectedPeerId = data.clientId;
         
         if (this.state.role === 'host' && this.state.streaming) {
+            this.log(`[HOST] Creating offer for client ${data.clientId}`, 'info');
             this.createOffer();
         }
     }

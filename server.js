@@ -16,15 +16,18 @@ try {
 // Use environment variable or default port
 const PORT = process.env.PORT || 9000;
 
+// Determine base directory (works with pkg)
+const BASE_DIR = path.dirname(require.main?.filename || process.argv[1]);
+
 // Create HTTP server to serve static files
 const server = http.createServer((req, res) => {
     // Print request info for debugging
     console.log(`Received request for: ${req.url} from ${req.socket.remoteAddress}`);
     
     // Handle static file requests
-    let filePath = '.' + req.url;
-    if (filePath === './') {
-        filePath = './index.html';
+    let filePath = path.join(BASE_DIR, req.url);
+    if (req.url === '/' || req.url === '') {
+        filePath = path.join(BASE_DIR, 'index.html');
     }
     
     // Get the file extension
@@ -56,8 +59,9 @@ const server = http.createServer((req, res) => {
         if (error) {
             if (error.code === 'ENOENT') {
                 // File not found - handle app.js specially
-                if (filePath === './app.js') {
-                    fs.readFile('./app.js', (err, data) => {
+                if (req.url === '/app.js') {
+                    const appJsPath = path.join(BASE_DIR, 'app.js');
+                    fs.readFile(appJsPath, (err, data) => {
                         if (err) {
                             res.writeHead(404);
                             res.end('app.js not found');
@@ -84,6 +88,9 @@ const server = http.createServer((req, res) => {
 
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
+
+// Increase max listeners to avoid warning (pkg bundles can cause this)
+wss.setMaxListeners(20);
 
 // Store connected clients
 const clients = new Map();
@@ -448,7 +455,7 @@ function handleConnectToHost(client, data) {
 // Handle WebRTC offer
 function handleOffer(client, data) {
     const targetId = data.targetId || findPeerForClient(client.id);
-    console.log(`[Client ${client.id}] Sending offer to ${targetId}`);
+    console.log(`[Client ${client.id}] Sending offer to ${targetId} (role: ${client.role})`);
     
     const target = clients.get(parseInt(targetId));
     if (target && target.ws.readyState === WebSocket.OPEN) {
@@ -456,6 +463,7 @@ function handleOffer(client, data) {
         clientPeers.set(client.id, target);
         clientPeers.set(target.id, client);
         
+        console.log(`[Server] Forwarding offer from ${client.id} (${client.role}) to ${target.id} (${target.role})`);
         sendToClient(target, {
             type: 'offer',
             offer: data.offer,
@@ -491,10 +499,11 @@ function findPeerForClient(clientId) {
 // Handle WebRTC answer
 function handleAnswer(client, data) {
     const targetId = data.targetId || findPeerForClient(client.id);
-    console.log(`[Client ${client.id}] Sending answer to ${targetId}`);
+    console.log(`[Client ${client.id}] Sending answer to ${targetId} (role: ${client.role})`);
     
     const target = clients.get(parseInt(targetId));
     if (target && target.ws.readyState === WebSocket.OPEN) {
+        console.log(`[Server] Forwarding answer from ${client.id} (${client.role}) to ${target.id} (${target.role})`);
         sendToClient(target, {
             type: 'answer',
             answer: data.answer,
@@ -507,7 +516,7 @@ function handleAnswer(client, data) {
 
 // Handle ICE candidate
 function handleIceCandidate(client, data) {
-    console.log(`[Client ${client.id}] Forwarding ICE candidate`);
+    console.log(`[Client ${client.id}] Forwarding ICE candidate (role: ${client.role}) targetId: ${data.targetId || 'auto'}`);
     
     // Forward to specific target if provided
     if (data.targetId) {

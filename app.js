@@ -341,6 +341,11 @@ class RemoteDesktopApp {
             
             this.localStream = await navigator.mediaDevices.getDisplayMedia(constraints);
             
+            this.debug(`Got display media stream: ${this.localStream.id}, tracks: ${this.localStream.getTracks().length}`);
+            this.localStream.getTracks().forEach((track, i) => {
+                this.debug(`Track ${i}: kind=${track.kind}, label=${track.label}, enabled=${track.enabled}, readyState=${track.readyState}`);
+            });
+            
             // Performance optimization: Configure video tracks for high performance
             const videoTrack = this.localStream.getVideoTracks()[0];
             if (videoTrack) {
@@ -370,10 +375,12 @@ class RemoteDesktopApp {
             this.localVideo.srcObject = this.localStream;
             
             // Handle stream end
-            this.localStream.getVideoTracks()[0].onended = () => {
-                this.debug('Screen share ended by user');
-                this.stopScreenShare();
-            };
+            this.localStream.getVideoTracks().forEach(track => {
+                track.onended = () => {
+                    this.debug(`Track ended: ${track.kind}`);
+                    this.stopScreenShare();
+                };
+            });
             
             this.updateStatus('Screen sharing active with optimized settings', 'connected');
             this.shareBtn.disabled = true;
@@ -424,7 +431,15 @@ class RemoteDesktopApp {
     handleClientJoined(data) {
         if (this.role !== 'host') return;
         
-        this.debug(`Client ${data.clientId} joined`);
+        this.debug(`Client ${data.clientId} joined, localStream: ${!!this.localStream}, connectedPeerId: ${this.connectedPeerId}`);
+        
+        // Close existing peer connection if any (prevents duplicate connections on manual reconnect)
+        if (this.pc) {
+            this.debug('Closing existing peer connection');
+            this.pc.close();
+            this.pc = null;
+        }
+        
         this.connectedPeerId = data.clientId;
         
         if (this.localStream) {
@@ -507,15 +522,24 @@ class RemoteDesktopApp {
         if (this.role === 'host' && this.localStream) {
             this.debug('Adding local stream to peer connection');
             this.localStream.getTracks().forEach(track => {
-                this.debug(`Adding track: ${track.kind}, enabled: ${track.enabled}`);
-                this.pc.addTrack(track, this.localStream);
+                this.debug(`Adding track: ${track.kind}, enabled: ${track.enabled}, readyState: ${track.readyState}, muted: ${track.muted}`);
+                const sender = this.pc.addTrack(track, this.localStream);
+                this.debug(`Track added, sender: ${sender ? 'yes' : 'no'}`);
+                // Monitor track state changes
+                track.onmute = () => this.debug(`Track ${track.kind} muted`);
+                track.onunmute = () => this.debug(`Track ${track.kind} unmuted`);
+                track.onended = () => this.debug(`Track ${track.kind} ENDED - screen share stopped`);
+            });
+            // Log transceiver state
+            this.pc.getTransceivers().forEach((t, i) => {
+                this.debug(`Transceiver ${i}: direction=${t.direction}, track=${t.sender.track ? t.sender.track.kind : 'none'}, trackId=${t.sender.track?.id}`);
             });
         }
     }
     
     async createAndSendOffer() {
         try {
-            this.debug('Creating optimized offer');
+            this.debug(`Creating optimized offer for peer ${this.connectedPeerId}`);
             
             // Set codec preferences if supported
             if (RTCRtpSender.getCapabilities && this.config.codecPreferences.length > 0) {
@@ -651,9 +675,52 @@ class RemoteDesktopApp {
         return lines.join('\n');
     }
     
+    async handleOffer(data) {
+        this.debug(`Received offer from ${data.fromId}, my connectedPeerId: ${this.connectedPeerId}`);
+        
+        if (!this.pc) {
+            this.createPeerConnection();
+        }
+        
+        try {
+            await this.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            this.debug('Set remote description (offer)');
+            
+            // Create answer
+            const answer = await this.pc.createAnswer();
+            await this.pc.setLocalDescription(answer);
+            this.debug('Created and set local description (answer)');
+            
+            // Send answer back to host
+            const targetId = data.fromId || this.connectedPeerId;
+            this.debug(`Sending answer to ${targetId}`);
+            this.sendMessage({
+                type: 'answer',
+                answer: this.pc.localDescription,
+                targetId: targetId
+            });
+            this.debug('Sent answer');
+        } catch (error) {
+            this.debug(`Error handling offer: ${error}`, 'error');
+        }
+    }
+    
+    async handleAnswer(data) {
+        this.debug(`Received answer from ${data.fromId}`);
+        
+        if (this.pc) {
+            try {
+                await this.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                this.debug('Set remote description (answer)');
+            } catch (error) {
+                this.debug(`Error handling answer: ${error}`, 'error');
+            }
+        }
+    }
+    
     handleLocalIceCandidate(event) {
         if (event.candidate) {
-            this.debug('Sending ICE candidate');
+            this.debug(`Sending ICE candidate to ${this.connectedPeerId}: ${event.candidate.candidate}`);
             this.sendMessage({
                 type: 'ice-candidate',
                 candidate: event.candidate,
@@ -663,6 +730,7 @@ class RemoteDesktopApp {
     }
     
     async handleIceCandidate(data) {
+        this.debug(`Received ICE candidate from ${data.fromId}`);
         if (this.pc) {
             try {
                 await this.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
@@ -674,16 +742,42 @@ class RemoteDesktopApp {
     }
     
     handleRemoteTrack(event) {
-        this.debug(`Received remote track: ${event.track.kind}`);
+        this.debug(`Received remote track: ${event.track.kind}, trackId: ${event.track.id}, streams: ${event.streams.length}`);
         
         if (event.streams && event.streams[0]) {
-            this.remoteStream = event.streams[0];
-            this.remoteVideo.srcObject = this.remoteStream;
-            
-            // Ensure video plays
-            this.remoteVideo.play().catch(e => {
-                this.debug(`Error playing video: ${e}`, 'error');
+            event.streams[0].getTracks().forEach((t, i) => {
+                this.debug(`Stream track ${i}: kind=${t.kind}, id=${t.id}, enabled=${t.enabled}, readyState=${t.readyState}`);
             });
+            
+            // Only set srcObject if it's a new stream (avoid AbortError from repeated sets)
+            if (this.remoteVideo.srcObject !== event.streams[0]) {
+                this.remoteStream = event.streams[0];
+                this.remoteVideo.srcObject = this.remoteStream;
+            }
+            
+            // Ensure video plays - wait for canplay event to avoid AbortError
+            const playVideo = () => {
+                // Don't try to play if already playing or paused by user
+                if (this.remoteVideo.paused && !this.remoteVideo.ended) {
+                    this.remoteVideo.play().catch(e => {
+                        if (e.name === 'AbortError') {
+                            // Retry after a short delay
+                            setTimeout(playVideo, 100);
+                        } else if (e.name === 'NotAllowedError') {
+                            this.debug('Autoplay blocked - user interaction required', 'warning');
+                        } else {
+                            this.debug(`Error playing video: ${e}`, 'error');
+                        }
+                    });
+                }
+            };
+            
+            // If video is already ready, play immediately; otherwise wait for canplay
+            if (this.remoteVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+                playVideo();
+            } else {
+                this.remoteVideo.oncanplay = playVideo;
+            }
             
             if (this.role === 'client') {
                 this.updateStatus('Receiving screen share', 'connected');

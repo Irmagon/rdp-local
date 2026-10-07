@@ -3,18 +3,27 @@
   "version": "1.0.0",
   "description": "Remote Desktop with WebRTC and RobotJS",
   "main": "server.js",
+  "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "build": "pkg . --targets node18-win-x64 --output dist/remote-desktop.exe",
+    "build:all": "pkg . --targets node18-win-x64,node18-linux-x64,node18-macos-x64 --out-path dist"
   },
   "engines": {
     "node": ">=14.0.0"
   },
   "dependencies": {
-    "robotjs": "^0.6.0",
+    "robotjs": "^0.9.1",
     "ws": "^8.18.2"
   },
   "devDependencies": {
-    "nodemon": "^2.0.22"
+    "nodemon": "^2.0.22",
+    "pkg": "^5.8.1"
+  },
+  "pkg": {
+    "assets": ["index.html", "app.js", "style.css"],
+    "targets": ["node18-win-x64"],
+    "outputPath": "dist"
   }
 }
