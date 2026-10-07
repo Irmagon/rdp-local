@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -13,16 +14,211 @@ try {
     console.log('⚠️  RobotJS not available - remote control will be simulated');
 }
 
-// Use environment variable or default port
-const PORT = process.env.PORT || 9000;
-
 // Determine base directory (works with pkg)
 const BASE_DIR = path.dirname(require.main?.filename || process.argv[1]);
+// Under pkg, BASE_DIR points inside the read-only snapshot: fine for bundled
+// assets (index.html), but anything the server must CREATE (user config.ini,
+// generated TLS certs) goes to DATA_DIR — next to the .exe, always writable.
+const IS_PKG = typeof process.pkg !== 'undefined';
+const DATA_DIR = IS_PKG ? path.dirname(process.execPath) : BASE_DIR;
 
-// Create HTTP server to serve static files
-const server = http.createServer((req, res) => {
+// Minimal INI parser (sections, key=value, ;/# comments). No dependencies.
+function parseIni(text) {
+    const out = {};
+    let section = null;
+    text.split(/\r?\n/).forEach((raw) => {
+        const line = raw.trim();
+        if (!line || line.startsWith(';') || line.startsWith('#')) return;
+        const sm = line.match(/^\[(.+)\]$/);
+        if (sm) {
+            section = sm[1].trim().toLowerCase();
+            out[section] = out[section] || {};
+            return;
+        }
+        const eq = line.indexOf('=');
+        if (eq === -1 || !section) return;
+        let val = line.slice(eq + 1).trim();
+        if (val.length >= 2 && ((val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'")))) {
+            val = val.slice(1, -1);
+        }
+        out[section][line.slice(0, eq).trim().toLowerCase()] = val;
+    });
+    return out;
+}
+
+// Server settings live in config.ini (CONFIG path, or next to the server/exe).
+// Precedence: environment variables > config.ini > built-in defaults.
+// On first boot the template below is written next to the server/exe so the
+// user always has an editable config.ini (inside a pkg snapshot it would be
+// read-only and invisible).
+const DEFAULT_CONFIG_TEXT = `; Remote Desktop Server configuration
+; Lines starting with ; or # are comments.
+; Precedence: environment variables > this file > built-in defaults.
+; Env overrides: PORT, HOST, SSL_KEY, SSL_CERT, SSL_NO_AUTO, CONFIG (custom path).
+
+[server]
+; TCP port to listen on
+port = 9000
+; Interface to bind: 0.0.0.0 = all interfaces, or pin one IP (e.g. 192.168.1.2).
+; A pinned IP is the ONLY advertised address, the ONLY listened interface,
+; and the ONLY name on the auto-generated certificate.
+host = 0.0.0.0
+; Verbose logging (1 = full chatter: WS messages, ICE, HTTP hits, keys).
+; Warnings and errors always print.
+verbose = 0
+
+[ssl]
+; Paths to TLS key/cert (absolute or relative to the server directory).
+; Missing files are auto-generated self-signed on first boot.
+key = ssl/key.pem
+cert = ssl/cert.pem
+; Set to 1 to disable auto-generation and stay on plain HTTP
+; (screen sharing will then work only via localhost)
+no_auto = 0
+`;
+
+function resolveConfigPath() {
+    if (process.env.CONFIG) return process.env.CONFIG;
+    const userPath = path.join(DATA_DIR, 'config.ini');
+    try {
+        if (!fs.existsSync(userPath)) {
+            // Prefer the bundled template (pkg snapshot) when available.
+            let template = null;
+            try {
+                const snapPath = path.join(BASE_DIR, 'config.ini');
+                if (snapPath !== userPath && fs.existsSync(snapPath)) {
+                    template = fs.readFileSync(snapPath, 'utf-8');
+                }
+            } catch (e) { /* ignore - fall back to embedded template */ }
+            fs.mkdirSync(path.dirname(userPath), { recursive: true });
+            fs.writeFileSync(userPath, template || DEFAULT_CONFIG_TEXT);
+            console.log(`📝 Created default config.ini at ${userPath}`);
+        }
+    } catch (error) {
+        console.log(`⚠️  Could not create default config.ini: ${error.message}`);
+    }
+    return userPath;
+}
+
+function loadConfig() {
+    const cfgPath = resolveConfigPath();
+    let ini = {};
+    try {
+        if (fs.existsSync(cfgPath)) {
+            ini = parseIni(fs.readFileSync(cfgPath, 'utf-8'));
+        } else {
+            console.log(`ℹ️  config.ini not found at ${cfgPath} - using defaults`);
+        }
+    } catch (error) {
+        console.log(`⚠️  Could not read config.ini: ${error.message} - using defaults`);
+    }
+    const srv = ini.server || {};
+    const ssl = ini.ssl || {};
+    // Writable-relative paths resolve against DATA_DIR (exe-adjacent under pkg).
+    const resolvePath = (p) => (path.isAbsolute(p) ? p : path.join(DATA_DIR, p));
+    return {
+        path: cfgPath,
+        port: parseInt(process.env.PORT || srv.port || '9000', 10) || 9000,
+        host: process.env.HOST || srv.host || '0.0.0.0',
+        sslKey: resolvePath(process.env.SSL_KEY || ssl.key || 'ssl/key.pem'),
+        sslCert: resolvePath(process.env.SSL_CERT || ssl.cert || 'ssl/cert.pem'),
+        sslNoAuto: ['1', 'true', 'yes', 'on'].includes(
+            String(process.env.SSL_NO_AUTO || ssl.no_auto || '0').toLowerCase()),
+        verbose: ['1', 'true', 'yes', 'on'].includes(
+            String(process.env.VERBOSE || srv.verbose || '0').toLowerCase())
+    };
+}
+const CONFIG = loadConfig();
+console.log(`⚙️  Config: ${CONFIG.path} (port=${CONFIG.port}, host=${CONFIG.host})`);
+
+// Verbose-only logging for high-frequency/routine chatter (candidates,
+// HTTP hits, per-key events). Warnings and errors always print.
+function vlog(...args) {
+    if (CONFIG.verbose) console.log(...args);
+}
+
+// Use environment variable or default port
+const PORT = CONFIG.port;
+const HOST = CONFIG.host;
+
+// Optional TLS: browsers expose screen capture (getDisplayMedia) only in
+// secure contexts (https://, localhost). Plain http://<lan-ip> hides
+// navigator.mediaDevices entirely. Certs are auto-generated on first boot
+// ([ssl] key/cert in config.ini) so LAN sharing works out of the box;
+// set [ssl] no_auto=1 (or SSL_NO_AUTO=1) to keep plain HTTP.
+// True for IPv4/IPv6 literals (go to SAN as type 7), false for DNS names (type 2).
+function isIpLiteral(v) {
+    return /^[0-9a-fA-F:.]+$/.test(v || '') && /[0-9]/.test(v || '');
+}
+
+// Specific bind address from config.ini ([server] host), or null when the
+// server listens on all interfaces (0.0.0.0 / ::).
+function boundHostName() {
+    const h = (CONFIG.host || '').trim();
+    if (!h || h === '0.0.0.0' || h === '::') return null;
+    return h;
+}
+
+function ensureTLSCerts() {
+    const keyPath = CONFIG.sslKey;
+    const certPath = CONFIG.sslCert;
+    try {
+        if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+            return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath), auto: false };
+        }
+    } catch (error) {
+        console.log(`⚠️  Could not load TLS certs: ${error.message}`);
+    }
+    if (CONFIG.sslNoAuto) return null;
+    let selfsigned = null;
+    try {
+        selfsigned = require('selfsigned');
+    } catch (error) {
+        console.log('⚠️  "selfsigned" module missing - run `npm install` for auto HTTPS');
+        return null;
+    }
+    try {
+        fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+        // If config pins a specific bind address, the cert is issued for it
+        // (and only it) instead of every local interface.
+        const bound = boundHostName();
+        const ips = bound ? [bound] : getLocalIPs();
+        const cn = bound || ips[0] || 'localhost';
+        const altNames = [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }];
+        ips.forEach((ip) => {
+            if (isIpLiteral(ip)) {
+                if (!altNames.some((a) => a.ip === ip)) altNames.push({ type: 7, ip });
+            } else if (!altNames.some((a) => a.value === ip)) {
+                altNames.push({ type: 2, value: ip });
+            }
+        });
+        const pems = selfsigned.generate([{ name: 'commonName', value: cn }], {
+            keySize: 2048,
+            days: 825,
+            algorithm: 'sha256',
+            extensions: [{ name: 'subjectAltName', altNames }]
+        });
+        fs.writeFileSync(keyPath, pems.private, { mode: 0o600 });
+        fs.writeFileSync(certPath, pems.cert);
+        console.log(`🔒 Auto-generated self-signed cert (CN=${cn}) at ${path.dirname(keyPath)}`);
+        console.log('   Browsers will show a warning on first open - accept it once.');
+        return { key: pems.private, cert: pems.cert, auto: true };
+    } catch (error) {
+        console.log(`⚠️  Auto cert generation failed: ${error.message}`);
+        return null;
+    }
+}
+const TLS_OPTIONS = ensureTLSCerts();
+const USE_HTTPS = !!TLS_OPTIONS;
+if (USE_HTTPS) {
+    console.log('🔒 TLS certificates found - serving HTTPS (LAN screen sharing enabled)');
+}
+
+// Create HTTP(S) server to serve static files
+const requestHandler = (req, res) => {
     // Print request info for debugging
-    console.log(`Received request for: ${req.url} from ${req.socket.remoteAddress}`);
+    vlog(`Received request for: ${req.url} from ${req.socket.remoteAddress}`);
     
     // Handle static file requests
     let filePath = path.join(BASE_DIR, req.url);
@@ -58,21 +254,6 @@ const server = http.createServer((req, res) => {
     fs.readFile(filePath, (error, content) => {
         if (error) {
             if (error.code === 'ENOENT') {
-                // File not found - handle app.js specially
-                if (req.url === '/app.js') {
-                    const appJsPath = path.join(BASE_DIR, 'app.js');
-                    fs.readFile(appJsPath, (err, data) => {
-                        if (err) {
-                            res.writeHead(404);
-                            res.end('app.js not found');
-                            return;
-                        }
-                        res.writeHead(200, { 'Content-Type': 'text/javascript' });
-                        res.end(data, 'utf-8');
-                    });
-                    return;
-                }
-                
                 res.writeHead(404);
                 res.end(`File not found: ${filePath}`);
             } else {
@@ -84,7 +265,11 @@ const server = http.createServer((req, res) => {
             res.end(content, 'utf-8');
         }
     });
-});
+};
+
+const server = USE_HTTPS
+    ? https.createServer(TLS_OPTIONS, requestHandler)
+    : http.createServer(requestHandler);
 
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
@@ -188,10 +373,8 @@ wss.on('connection', (ws, req) => {
             }
             
             const data = JSON.parse(message);
-            // Don't spam logs with high-frequency types (frames ~5/s, control).
-            if (data.type !== 'screen-frame' && data.type !== 'control') {
-                console.log(`[Client ${clientId}] Message: ${data.type}`);
-            }
+            // Routine chatter only in verbose mode (see config.ini [server] verbose).
+            vlog(`[Client ${clientId}] Message: ${data.type}`);
             
             // Performance optimization: Update last event time
             client.lastEventTime = Date.now();
@@ -226,9 +409,20 @@ wss.on('connection', (ws, req) => {
                     break;
                     
                 case 'control':
-                    // Performance optimization: Add to queue for priority handling
-                    if (EVENT_PRIORITIES[data.action]) {
+                    // Mousemove is idempotent and high-frequency: handle it
+                    // immediately. Queueing it made thousands of moves pile up
+                    // (one processed per tick + full sort per message), so the
+                    // remote cursor lagged seconds behind and clicks/keys
+                    // starved behind the backlog - looking "not transmitted".
+                    if (data.action === 'mousemove') {
+                        handleControl(client, data);
+                    } else if (EVENT_PRIORITIES[data.action]) {
                         client.eventQueue.push(data);
+                        // Cap the queue: a flooding client must not grow it
+                        // unbounded (each push used to trigger a full sort).
+                        if (client.eventQueue.length > 100) {
+                            client.eventQueue.splice(0, client.eventQueue.length - 100);
+                        }
                         processEventQueue(client);
                     } else {
                         handleControl(client, data);
@@ -256,7 +450,10 @@ wss.on('connection', (ws, req) => {
         // Remove from maps
         if (client.role === 'host') {
             hosts.delete(clientId);
-            
+
+            // Refresh remaining viewers' host lists
+            broadcastHostList();
+
             // Notify all viewers
             viewers.forEach((viewer) => {
                 sendToClient(viewer, {
@@ -285,20 +482,30 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// Process event queue based on priority
+// Process queued discrete input events (clicks/keys/wheel) in priority order.
+// Bounded synchronous drain: no setImmediate chain per event, no parallel
+// pumps from concurrent messages, leftover work rescheduled once.
 function processEventQueue(client) {
-    if (client.eventQueue.length === 0) return;
-    
-    // Sort queue by priority
-    client.eventQueue.sort((a, b) => 
-        (EVENT_PRIORITIES[a.action] || 99) - (EVENT_PRIORITIES[b.action] || 99)
-    );
-    
-    // Process highest priority event
-    const event = client.eventQueue.shift();
-    handleControl(client, event);
-    
-    // If there are more events, process them in the next tick
+    if (client._pumping) return;
+    client._pumping = true;
+    try {
+        let n = 0;
+        while (client.eventQueue.length > 0 && n < 50) {
+            // Sort queue by priority
+            client.eventQueue.sort((a, b) =>
+                (EVENT_PRIORITIES[a.action] || 99) - (EVENT_PRIORITIES[b.action] || 99)
+            );
+
+            // Process highest priority event
+            const event = client.eventQueue.shift();
+            handleControl(client, event);
+            n++;
+        }
+    } finally {
+        client._pumping = false;
+    }
+
+    // If there are more events, continue in the next tick
     if (client.eventQueue.length > 0) {
         setImmediate(() => processEventQueue(client));
     }
@@ -386,25 +593,78 @@ function forwardToPeer(client, data) {
     });
 }
 
+// True when the address belongs to this machine (loopback or a local NIC).
+function isLocalAddress(ip) {
+    const n = normIp(ip);
+    if (n === '127.0.0.1' || n === '::1' || n === 'localhost') return true;
+    try {
+        return getLocalIPs().includes(n);
+    } catch (e) {
+        return false;
+    }
+}
+
+// Normalize socket address for display: ::ffff:192.168.1.5 -> 192.168.1.5
+function normIp(ip) {
+    if (!ip) return 'unknown';
+    if (ip.startsWith('::ffff:')) return ip.slice(7);
+    return ip;
+}
+
+// Snapshot of sharing hosts for the viewer host list.
+// `local` tells the viewer whether remote control can work (RobotJS runs
+// on THIS server machine, so only a host on the same machine is steerable).
+function getHostList() {
+    const list = [];
+    hosts.forEach((host) => {
+        if (host.ready) {
+            list.push({ hostId: host.id, ip: normIp(host.ip), local: !!host.isLocal });
+        }
+    });
+    return list;
+}
+
+// Push current host list to all viewers (called on ready/stop/disconnect).
+function broadcastHostList() {
+    const hosts_list = getHostList();
+    viewers.forEach((viewer) => {
+        sendToClient(viewer, {
+            type: 'host-list',
+            hosts: hosts_list
+        });
+    });
+}
+
 // Handle registration
 function handleRegister(client, data) {
     client.role = data.role;
-    
+    // Whether this peer runs on the server machine: RobotJS can only move
+    // the cursor HERE, so remote control of this peer is possible.
+    client.isLocal = isLocalAddress(client.ip);
+
     if (data.role === 'host') {
         hosts.set(client.id, client);
-        console.log(`[Client ${client.id}] Registered as HOST`);
+        console.log(`[Client ${client.id}] Registered as HOST from ${normIp(client.ip)} (hosts online: ${hosts.size})`);
+        broadcastHostList();
     } else if (data.role === 'client') {
         viewers.set(client.id, client);
-        console.log(`[Client ${client.id}] Registered as CLIENT`);
-        
+        console.log(`[Client ${client.id}] Registered as CLIENT (viewers online: ${viewers.size})`);
+
+        // Send current host list (IP addresses) to the new viewer
+        sendToClient(client, {
+            type: 'host-list',
+            hosts: getHostList()
+        });
+
         // Check if any host is ready
         hosts.forEach((host) => {
             if (host.ready) {
                 sendToClient(client, {
                     type: 'host-available',
-                    hostId: host.id
+                    hostId: host.id,
+                    hostLocal: !!host.isLocal
                 });
-                
+
                 // Tell host about the viewer
                 sendToClient(host, {
                     type: 'client-joined',
@@ -413,12 +673,13 @@ function handleRegister(client, data) {
             }
         });
     }
-    
-    // Send confirmation
+
+    // Send confirmation (host panel shows IP instead of numeric session id)
     sendToClient(client, {
         type: 'registered',
         clientId: client.id,
-        role: client.role
+        role: client.role,
+        ip: normIp(client.ip)
     });
 }
 
@@ -426,14 +687,18 @@ function handleRegister(client, data) {
 function handleHostReady(host) {
     host.ready = true;
     console.log(`[Host ${host.id}] Ready to share`);
-    
+
+    // Refresh viewer host lists (IP addresses)
+    broadcastHostList();
+
     // Notify all viewers
     viewers.forEach((viewer) => {
         sendToClient(viewer, {
             type: 'host-available',
-            hostId: host.id
+            hostId: host.id,
+            hostLocal: !!host.isLocal
         });
-        
+
         // Tell host about the viewer
         sendToClient(host, {
             type: 'client-joined',
@@ -446,7 +711,10 @@ function handleHostReady(host) {
 function handleHostStopped(host) {
     host.ready = false;
     console.log(`[Host ${host.id}] Stopped sharing`);
-    
+
+    // Refresh viewer host lists (host disappeared)
+    broadcastHostList();
+
     // Notify all viewers
     viewers.forEach((viewer) => {
         sendToClient(viewer, {
@@ -463,11 +731,12 @@ function handleConnectToHost(client, data) {
     const host = clients.get(parseInt(data.hostId));
     if (host && host.role === 'host' && host.ready) {
         console.log(`[Client ${client.id}] Host found and ready`);
-        
+
         // Tell client about host
         sendToClient(client, {
             type: 'host-available',
-            hostId: host.id
+            hostId: host.id,
+            hostLocal: !!host.isLocal
         });
         
         // Tell host about client
@@ -487,7 +756,7 @@ function handleConnectToHost(client, data) {
 // Handle WebRTC offer
 function handleOffer(client, data) {
     const targetId = data.targetId || findPeerForClient(client.id);
-    console.log(`[Client ${client.id}] Sending offer to ${targetId} (role: ${client.role})`);
+    vlog(`[Client ${client.id}] Sending offer to ${targetId} (role: ${client.role})`);
     
     const target = clients.get(parseInt(targetId));
     if (target && target.ws.readyState === WebSocket.OPEN) {
@@ -495,7 +764,7 @@ function handleOffer(client, data) {
         clientPeers.set(client.id, target);
         clientPeers.set(target.id, client);
         
-        console.log(`[Server] Forwarding offer from ${client.id} (${client.role}) to ${target.id} (${target.role})`);
+        vlog(`[Server] Forwarding offer from ${client.id} (${client.role}) to ${target.id} (${target.role})`);
         sendToClient(target, {
             type: 'offer',
             offer: data.offer,
@@ -531,11 +800,11 @@ function findPeerForClient(clientId) {
 // Handle WebRTC answer
 function handleAnswer(client, data) {
     const targetId = data.targetId || findPeerForClient(client.id);
-    console.log(`[Client ${client.id}] Sending answer to ${targetId} (role: ${client.role})`);
+    vlog(`[Client ${client.id}] Sending answer to ${targetId} (role: ${client.role})`);
     
     const target = clients.get(parseInt(targetId));
     if (target && target.ws.readyState === WebSocket.OPEN) {
-        console.log(`[Server] Forwarding answer from ${client.id} (${client.role}) to ${target.id} (${target.role})`);
+        vlog(`[Server] Forwarding answer from ${client.id} (${client.role}) to ${target.id} (${target.role})`);
         sendToClient(target, {
             type: 'answer',
             answer: data.answer,
@@ -548,7 +817,7 @@ function handleAnswer(client, data) {
 
 // Handle ICE candidate
 function handleIceCandidate(client, data) {
-    console.log(`[Client ${client.id}] Forwarding ICE candidate (role: ${client.role}) targetId: ${data.targetId || 'auto'}`);
+    vlog(`[Client ${client.id}] Forwarding ICE candidate (role: ${client.role}) targetId: ${data.targetId || 'auto'}`);
     
     // Forward to specific target if provided
     if (data.targetId) {
@@ -588,10 +857,22 @@ function handleIceCandidate(client, data) {
 }
 
 // Handle remote control
+// Normalized (0-1) fraction -> screen pixels, clamped to bounds.
+// Returns null for garbage (NaN/Infinity/missing) so robotjs never throws
+// on coordinates (a throw here used to skip the button toggle below it).
+function toScreenPixels(frac, max) {
+    const v = Number(frac);
+    if (!Number.isFinite(v)) return null;
+    return Math.min(max - 1, Math.max(0, Math.round(v * max)));
+}
+
 function handleControl(client, data) {
     if (client.role !== 'client') return;
-    
-    console.log(`[Client ${client.id}] Control: ${data.action}`);
+
+    // mousemove/wheel arrive dozens per second - don't spam the log.
+    if (data.action !== 'mousemove' && data.action !== 'wheel') {
+        console.log(`[Client ${client.id}] Control: ${data.action}`);
+    }
     
     // Performance optimization: Create minimal data object for forwarding
     const minimalData = {
@@ -644,11 +925,39 @@ function handleControl(client, data) {
             Object.assign(minimalData, data);
     }
     
-    // Forward to all hosts
-    hosts.forEach((host) => {
-        sendToClient(host, minimalData);
-    });
-    
+    // Route input to the intended host only (legacy packets without
+    // targetId still go to all hosts).
+    const targetId = data.targetId !== undefined && data.targetId !== null
+        ? parseInt(data.targetId, 10) : NaN;
+    const target = Number.isFinite(targetId) ? clients.get(targetId) : null;
+    const targetHost = target && target.role === 'host' ? target : null;
+    if (targetHost) {
+        sendToClient(targetHost, minimalData);
+    } else {
+        hosts.forEach((host) => {
+            sendToClient(host, minimalData);
+        });
+    }
+
+    // RobotJS moves the cursor OF THIS SERVER MACHINE. Executing input for
+    // a host on another machine would yank the wrong cursor (and the real
+    // target would ignore it) - so run robot only when the target host IS
+    // this machine. Otherwise tell the viewer to move the server.
+    const targetIsLocal = targetHost ? !!targetHost.isLocal : true;
+    if (targetHost && !targetIsLocal) {
+        const nowMs = Date.now();
+        if (!client._lastNoControlWarn || nowMs - client._lastNoControlWarn > 15000) {
+            client._lastNoControlWarn = nowMs;
+            const hostIp = normIp(targetHost.ip);
+            console.log(`⚠️  [Client ${client.id}] Control target is host ${targetHost.id} (${hostIp}) - NOT this server machine. RobotJS skipped. Run the server ON the host for remote control.`);
+            sendToClient(client, {
+                type: 'control-unavailable',
+                message: `Host ${hostIp} is not this server machine - remote control unavailable. Run remote-desktop on the host itself.`
+            });
+        }
+        return;
+    }
+
     // If robotjs is available, perform the action
     if (robot) {
         try {
@@ -678,60 +987,80 @@ function handleControl(client, data) {
                         }
                     } else {
                         // Use absolute positioning
-                        const x = Math.round(data.x * screenSize.width);
-                        const y = Math.round(data.y * screenSize.height);
-                        
+                        const x = toScreenPixels(data.x, screenSize.width);
+                        const y = toScreenPixels(data.y, screenSize.height);
+                        if (x === null || y === null) break;
+
+                        // 1/sec trace: compare with client's [TRACE] mouse out.
+                        const nowMs = Date.now();
+                        if (!global._mouseTraceT || nowMs - global._mouseTraceT > 1000) {
+                            global._mouseTraceT = nowMs;
+                            vlog(`[TRACE] mouse in client=${client.id} frac=${data.x},${data.y} -> px=${x},${y} screen=${screenSize.width}x${screenSize.height}`);
+                        }
+                        // Competing senders (e.g. a stale viewer tab with cached
+                        // JS) fight over the cursor and it "jumps". Detect it.
+                        if (global._lastMoveFrom && global._lastMoveFrom.id !== null &&
+                            global._lastMoveFrom.id !== client.id &&
+                            nowMs - global._lastMoveFrom.t < 1500 &&
+                            (!global._dupWarnT || nowMs - global._dupWarnT > 10000)) {
+                            global._dupWarnT = nowMs;
+                            console.log(`⚠️  Two viewers sending mouse input (clients ${global._lastMoveFrom.id} and ${client.id}). Close duplicate viewer tabs!`);
+                        }
+                        global._lastMoveFrom = { id: client.id, t: nowMs };
+
                         // Get current mouse position and check if movement is significant
                         const currentPos = robot.getMousePos();
                         const deltaX = Math.abs(x - currentPos.x);
                         const deltaY = Math.abs(y - currentPos.y);
-                        
+
                         if (deltaX >= MOUSE_THRESHOLD || deltaY >= MOUSE_THRESHOLD) {
                             robot.moveMouse(x, y);
                         }
                     }
                     break;
-                    
+
                 case 'mousedown':
-                    const downX = Math.round(data.x * screenSize.width);
-                    const downY = Math.round(data.y * screenSize.height);
-                    robot.moveMouse(downX, downY);
-                    
+                    // Move only when coords are valid; the button toggle below
+                    // must ALWAYS run so clicks are never swallowed by bad coords.
+                    const downX = toScreenPixels(data.x, screenSize.width);
+                    const downY = toScreenPixels(data.y, screenSize.height);
+                    if (downX !== null && downY !== null) robot.moveMouse(downX, downY);
+
                     const button = buttonMap[data.button] || 'left';
-                    console.log(`[Control] Mouse down: ${downX},${downY} button: ${button}`);
+                    vlog(`[Control] Mouse down: ${downX},${downY} button: ${button}`);
                     robot.mouseToggle('down', button);
                     break;
-                    
+
                 case 'mouseup':
-                    const upX = Math.round(data.x * screenSize.width);
-                    const upY = Math.round(data.y * screenSize.height);
-                    robot.moveMouse(upX, upY);
-                    
+                    const upX = toScreenPixels(data.x, screenSize.width);
+                    const upY = toScreenPixels(data.y, screenSize.height);
+                    if (upX !== null && upY !== null) robot.moveMouse(upX, upY);
+
                     const upButton = buttonMap[data.button] || 'left';
-                    console.log(`[Control] Mouse up: ${upX},${upY} button: ${upButton}`);
+                    vlog(`[Control] Mouse up: ${upX},${upY} button: ${upButton}`);
                     robot.mouseToggle('up', upButton);
                     break;
-                
+
                 case 'click':
-                    const clickX = Math.round(data.x * screenSize.width);
-                    const clickY = Math.round(data.y * screenSize.height);
-                    robot.moveMouse(clickX, clickY);
+                    const clickX = toScreenPixels(data.x, screenSize.width);
+                    const clickY = toScreenPixels(data.y, screenSize.height);
+                    if (clickX !== null && clickY !== null) robot.moveMouse(clickX, clickY);
                     robot.mouseClick(buttonMap[data.button] || 'left');
                     break;
-                
+
                 case 'rightclick':
-                    const rclickX = Math.round(data.x * screenSize.width);
-                    const rclickY = Math.round(data.y * screenSize.height);
-                    robot.moveMouse(rclickX, rclickY);
+                    const rclickX = toScreenPixels(data.x, screenSize.width);
+                    const rclickY = toScreenPixels(data.y, screenSize.height);
+                    if (rclickX !== null && rclickY !== null) robot.moveMouse(rclickX, rclickY);
                     robot.mouseClick('right');
                     break;
-                    
+
                 case 'wheel':
                     // Handle both vertical and horizontal scrolling
                     // Ensure mouse is at the right position
-                    const scrollX = Math.round(data.x * screenSize.width);
-                    const scrollY = Math.round(data.y * screenSize.height);
-                    robot.moveMouse(scrollX, scrollY);
+                    const scrollX = toScreenPixels(data.x, screenSize.width);
+                    const scrollY = toScreenPixels(data.y, screenSize.height);
+                    if (scrollX !== null && scrollY !== null) robot.moveMouse(scrollX, scrollY);
                     
                     // Normalize scroll amounts - invert deltaY to match natural scroll direction
                     // Use mode to determine the scale factor (0=pixels, 1=lines, 2=pages)
@@ -748,18 +1077,18 @@ function handleControl(client, data) {
                         hScroll = Math.sign(data.deltaX) * Math.min(Math.abs(data.deltaX / scaleFactor), 100);
                     }
                     
-                    console.log(`[Control] Scroll: v=${vScroll}, h=${hScroll}`);
+                    vlog(`[Control] Scroll: v=${vScroll}, h=${hScroll}`);
                     robot.scrollMouse(hScroll, vScroll);
                     break;
                 
                 // Performance optimization: Cached modifier state for keyboard events
                 case 'keydown':
-                    console.log(`[Keyboard] DOWN: ${data.key} (${data.code})`);
+                    vlog(`[Keyboard] DOWN: ${data.key} (${data.code})`);
                     handleKeyboardEvent(client, data, true);
                     break;
                     
                 case 'keyup':
-                    console.log(`[Keyboard] UP: ${data.key} (${data.code})`);
+                    vlog(`[Keyboard] UP: ${data.key} (${data.code})`);
                     handleKeyboardEvent(client, data, false);
                     break;
             }
@@ -768,7 +1097,7 @@ function handleControl(client, data) {
         }
     } else {
         if (data.action === 'keydown' || data.action === 'keyup') {
-            console.log(`[NO ROBOTJS] ${data.action} ${data.key} (${data.code}). Install RobotJS for keyboard control.`);
+            vlog(`[NO ROBOTJS] ${data.action} ${data.key} (${data.code}). Install RobotJS for keyboard control.`);
         }
     }
 }
@@ -776,7 +1105,7 @@ function handleControl(client, data) {
 // Helper function to handle keyboard events
 function handleKeyboardEvent(client, data, isDown) {
     if (!robot) {
-        console.log(`[Warning] RobotJS not available - cannot process keyboard events`);
+        vlog(`[Warning] RobotJS not available - cannot process keyboard events`);
         return;
     }
     
@@ -802,7 +1131,7 @@ function handleKeyboardEvent(client, data, isDown) {
             clientKeyState[key] = isDown;
             
             robot.keyToggle(key, action);
-            console.log(`[RobotJS] Toggled modifier: ${key} ${action}`);
+            vlog(`[RobotJS] Toggled modifier: ${key} ${action}`);
             return;
         }
         
@@ -820,26 +1149,26 @@ function handleKeyboardEvent(client, data, isDown) {
                 if (!clientKeyState[mod]) {
                     clientKeyState[mod] = true;
                     robot.keyToggle(mod, 'down');
-                    console.log(`[RobotJS] Modifier down: ${mod}`);
+                    vlog(`[RobotJS] Modifier down: ${mod}`);
                 }
             });
             
             // Press main key
             robot.keyToggle(key, 'down');
-            console.log(`[RobotJS] Key down: ${key}`);
+            vlog(`[RobotJS] Key down: ${key}`);
         }
         // For key up, release the key then toggle off modifiers
         else {
             // Release main key
             robot.keyToggle(key, 'up');
-            console.log(`[RobotJS] Key up: ${key}`);
+            vlog(`[RobotJS] Key up: ${key}`);
             
             // Only release modifiers that are no longer needed
             Object.keys(clientKeyState).forEach(mod => {
                 if (clientKeyState[mod] && !modifiers.includes(mod)) {
                     clientKeyState[mod] = false;
                     robot.keyToggle(mod, 'up');
-                    console.log(`[RobotJS] Modifier up: ${mod}`);
+                    vlog(`[RobotJS] Modifier up: ${mod}`);
                 }
             });
         }
@@ -907,38 +1236,73 @@ function testNetworkInterfaces() {
     }
 }
 
-// Start server
-server.listen(PORT, '0.0.0.0', () => {
+// Start server (bound interface comes from config.ini [server] host)
+server.on('error', (err) => {
+    if (err && err.code === 'EADDRNOTAVAIL') {
+        console.error(`\n❌ Cannot bind to ${HOST}:${PORT} - address not present on this machine.`);
+        console.error('   Fix [server] host in config.ini (0.0.0.0 = all interfaces).');
+    } else if (err && err.code === 'EADDRINUSE') {
+        console.error(`\n❌ Port ${PORT} already in use - change [server] port in config.ini.`);
+    } else {
+        console.error('\n❌ Server error:', err && err.message ? err.message : err);
+    }
+    process.exit(1);
+});
+server.listen(PORT, HOST, () => {
     console.log('\n==========================================');
     console.log('   Remote Desktop Server');
     console.log('==========================================\n');
-    
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Local access: http://localhost:${PORT}`);
-    
-    const ips = getLocalIPs();
-    if (ips.length > 0) {
-        console.log('\nNetwork access:');
-        ips.forEach(ip => {
-            console.log(`  http://${ip}:${PORT}`);
-        });
+
+    const proto = USE_HTTPS ? 'https' : 'http';
+    const bound = boundHostName();
+    console.log(`Server running on port ${PORT} (${USE_HTTPS ? 'HTTPS' : 'HTTP'}), interface: ${bound || 'all (0.0.0.0)'}`);
+    console.log('Control mapping: ctrl-fix-2 (validated+clamped coords, toggle-always)');
+
+    if (bound) {
+        // Pinned interface: advertise only it - nothing else is reachable.
+        console.log(`\nAccess: ${proto}://${bound}:${PORT}`);
     } else {
-        console.log('\nWARNING: No network interfaces detected! This might prevent access from other devices.');
+        console.log(`Local access: ${proto}://localhost:${PORT}`);
+
+        const ips = getLocalIPs();
+        if (ips.length > 0) {
+            console.log('\nNetwork access:');
+            ips.forEach(ip => {
+                console.log(`  ${proto}://${ip}:${PORT}`);
+            });
+        } else {
+            console.log('\nWARNING: No network interfaces detected! This might prevent access from other devices.');
+        }
     }
-    
-    // Test and show detailed network interface info
-    testNetworkInterfaces();
-    
+
+    if (!USE_HTTPS) {
+        console.log('\n⚠️  HTTP mode: browsers allow screen capture only via localhost.');
+        console.log('   HOST must open http://localhost:' + PORT + ' on its own machine.');
+        if (!bound) console.log('   Viewers may use the LAN addresses above.');
+        console.log('   (Auto HTTPS failed or SSL_NO_AUTO=1. Manual cert:');
+        console.log('    openssl req -x509 -newkey rsa:2048 -nodes -days 365 \\');
+        console.log('      -keyout ssl/key.pem -out ssl/cert.pem -subj "/CN=<host-lan-ip>")');
+    } else if (TLS_OPTIONS.auto) {
+        console.log(`\n✅ HTTPS auto-enabled (self-signed cert for ${bound || 'all interfaces'}). Open the https:// address above,`);
+        console.log('   accept the browser warning once, and LAN screen sharing will work.');
+    }
+
+    if (!bound) {
+        // Full interface dump is only useful when listening on all of them.
+        if (CONFIG.verbose) testNetworkInterfaces();
+    }
+
     console.log('\n📋 Instructions:');
     console.log('1. Open the URL in browser on both computers');
     console.log('2. Host: Click "Host" then "Start Screen Share"');
     console.log('3. Client: Click "Client" and wait for connection');
     console.log('4. Client: Click "Enable Control" to control the host\n');
-    
+    console.log('🖱️  Remote control moves THIS server machine: run the server ON the host PC.');
+
     console.log('ℹ️ Network Tips:');
     console.log('- Make sure your firewall allows incoming connections to port ' + PORT);
     console.log('- Both devices must be on the same network');
-    console.log('- Try accessing the specific IP addresses shown above');
+    if (!bound) console.log('- Try accessing the specific IP addresses shown above');
     
     if (!robot) {
         console.log('\n⚠️  Note: RobotJS not installed - remote control simulated');
@@ -949,20 +1313,58 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\nShutting down...');
-    
-    // Notify all clients
+// NOTE: wss.close(cb) waits for every browser socket to disconnect, and
+// server.close(cb) waits for HTTP keep-alive — without force-closing both,
+// the process hangs on Ctrl+C forever.
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+    // Second Ctrl+C / signal while shutting down: exit immediately.
+    if (shuttingDown) {
+        console.log('\nForce exit...');
+        process.exit(1);
+    }
+    shuttingDown = true;
+    console.log(`\nShutting down (${signal})...`);
+
+    // Notify all clients, then graceful-close their sockets so the
+    // shutdown message has a chance to flush before the TCP teardown.
     clients.forEach((client) => {
-        sendToClient(client, {
-            type: 'server-shutdown'
-        });
+        try {
+            if (client.ws.readyState === WebSocket.OPEN) {
+                client.ws.send(JSON.stringify({ type: 'server-shutdown' }), () => {
+                    try { client.ws.close(1001, 'server shutdown'); } catch (e) { /* ignore */ }
+                });
+            } else {
+                try { client.ws.terminate(); } catch (e) { /* ignore */ }
+            }
+        } catch (e) { /* ignore */ }
     });
-    
+
+    // Stragglers that never answer the close handshake get terminated.
+    setTimeout(() => {
+        clients.forEach((client) => {
+            try { client.ws.terminate(); } catch (e) { /* ignore */ }
+        });
+    }, 500).unref();
+
     wss.close(() => {
+        // Drop HTTP keep-alive connections so server.close() can finish.
+        if (typeof server.closeAllConnections === 'function') {
+            try { server.closeAllConnections(); } catch (e) { /* ignore */ }
+        }
         server.close(() => {
             console.log('Server stopped');
             process.exit(0);
         });
     });
-});
+
+    // Safety: never hang longer than a few seconds.
+    setTimeout(() => {
+        console.log('Shutdown timeout, forcing exit');
+        process.exit(0);
+    }, 3000).unref();
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+// nodemon restart
+process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2'));

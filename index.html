@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remote Desktop Pro - Enhanced Version</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
 /* Reset and Variables */
 * {
@@ -305,10 +304,9 @@ body {
 
 #controlCanvas {
     position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     pointer-events: none;
     z-index: 10;
 }
@@ -317,6 +315,16 @@ body {
     pointer-events: auto;
     cursor: crosshair;
 }
+
+/* Local icon glyphs (no external font needed) */
+.ic {
+    font-style: normal;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+.ic.rec { color: #ff5b5b; }
 
 /* Local Video PiP */
 .local-video-pip {
@@ -753,7 +761,7 @@ body {
         <header class="header">
             <div class="header-left">
                 <div class="logo">
-                    <i class="fas fa-desktop"></i>
+                    <span class="ic">🖥</span>
                     <span>Remote Desktop Pro</span>
                 </div>
                 <div class="connection-status">
@@ -763,22 +771,22 @@ body {
             </div>
             <div class="header-controls">
                 <button class="header-control-btn" id="headerFullscreenBtn" title="Fullscreen">
-                    <i class="fas fa-expand"></i>
+                    <span class="ic">⤢</span>
                 </button>
                 <button class="header-control-btn" id="headerPipBtn" title="Picture in Picture">
-                    <i class="fas fa-external-link-square-alt"></i>
+                    <span class="ic">⊞</span>
                 </button>
                 <button class="header-control-btn" id="headerScreenshotBtn" title="Screenshot">
-                    <i class="fas fa-camera"></i>
+                    <span class="ic">📷</span>
                 </button>
                 <button class="header-control-btn" id="headerRecordBtn" title="Record">
-                    <i class="fas fa-record-vinyl"></i>
+                    <span class="ic rec">●</span>
                 </button>
                 <button class="header-control-btn" id="headerToggleControlBtn" title="Toggle Control">
-                    <i class="fas fa-mouse-pointer"></i>
+                    <span class="ic">🖱</span>
                 </button>
                 <button class="header-control-btn" id="headerToggleSidebarBtn" title="Toggle Sidebar">
-                    <i class="fas fa-bars"></i>
+                    <span class="ic">☰</span>
                 </button>
             </div>
         </header>
@@ -789,12 +797,12 @@ body {
             <div class="role-selection" id="roleSelection">
                 <div class="role-grid">
                     <div class="role-card" data-role="host">
-                        <i class="role-icon fas fa-broadcast-tower"></i>
+                        <span class="role-icon">📡</span>
                         <h2 class="role-title">Host</h2>
                         <p class="role-description">Share your screen and allow remote control</p>
                     </div>
                     <div class="role-card" data-role="client">
-                        <i class="role-icon fas fa-eye"></i>
+                        <span class="role-icon">👁</span>
                         <h2 class="role-title">Viewer</h2>
                         <p class="role-description">Connect to and control a remote screen</p>
                     </div>
@@ -810,12 +818,13 @@ body {
                         <div class="panel" id="hostPanel" style="display: none;">
                             <div class="panel-header" onclick="togglePanel('hostPanel')">
                                 <h3>Host Settings</h3>
-                                <i class="fas fa-chevron-down"></i>
+                                <span class="ic">▾</span>
                             </div>
                             <div class="panel-body">
                                 <div class="form-group">
-                                    <label class="form-label">Session ID</label>
-                                    <input type="text" class="form-control" id="sessionId" readonly>
+                                    <label class="form-label">Your IP address</label>
+                                    <input type="text" class="form-control" id="sessionId" readonly placeholder="Waiting for server...">
+                                    <small id="hostNumericId" style="color:#b0b0b0;"></small>
                                 </div>
                                 <div class="form-group">
                                     <div class="checkbox-group">
@@ -829,10 +838,10 @@ body {
                                 </div>
                                 <div class="btn-group">
                                     <button class="btn btn-primary btn-block" id="startShareBtn">
-                                        <i class="fas fa-play"></i> Start Sharing
+                                        <span class="ic">▶</span> Start Sharing
                                     </button>
                                     <button class="btn btn-danger btn-block" id="stopShareBtn" disabled>
-                                        <i class="fas fa-stop"></i> Stop
+                                        <span class="ic">■</span> Stop
                                     </button>
                                 </div>
                             </div>
@@ -842,12 +851,14 @@ body {
                         <div class="panel" id="clientPanel" style="display: none;">
                             <div class="panel-header" onclick="togglePanel('clientPanel')">
                                 <h3>Viewer Settings</h3>
-                                <i class="fas fa-chevron-down"></i>
+                                <span class="ic">▾</span>
                             </div>
                             <div class="panel-body">
                                 <div class="form-group">
-                                    <label class="form-label">Host ID</label>
-                                    <input type="text" class="form-control" id="hostIdInput" placeholder="Enter host session ID">
+                                    <label class="form-label">Host</label>
+                                    <select class="form-control" id="hostSelect">
+                                        <option value="">No hosts online</option>
+                                    </select>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">Quality</label>
@@ -859,10 +870,10 @@ body {
                                     </select>
                                 </div>
                                 <button class="btn btn-primary btn-block" id="connectBtn">
-                                    <i class="fas fa-link"></i> Connect
+                                    <span class="ic">🔗</span> Connect
                                 </button>
                                 <button class="btn btn-secondary btn-block" id="enableControlBtn" disabled>
-                                    <i class="fas fa-gamepad"></i> Enable Control
+                                    <span class="ic">🎮</span> Enable Control
                                 </button>
                                 
                                 <!-- New keyboard and mouse control instructions -->
@@ -884,7 +895,7 @@ body {
                         <div class="panel collapsed" id="statsPanel">
                             <div class="panel-header" onclick="togglePanel('statsPanel')">
                                 <h3>Connection Stats</h3>
-                                <i class="fas fa-chevron-down"></i>
+                                <span class="ic">▾</span>
                             </div>
                             <div class="panel-body">
                                 <div class="stats-grid" id="statsGrid">
@@ -922,28 +933,6 @@ body {
                         <!-- Local Video PiP -->
                         <div class="local-video-pip hidden" id="localVideoPip">
                             <video id="localVideo" autoplay playsinline muted></video>
-                        </div>
-
-                        <!-- Video Controls -->
-                        <div class="video-controls hidden" id="videoControls">
-                            <button class="control-btn" id="fullscreenBtn" title="Fullscreen">
-                                <i class="fas fa-expand"></i>
-                            </button>
-                            <button class="control-btn" id="pipBtn" title="Picture in Picture">
-                                <i class="fas fa-external-link-square-alt"></i>
-                            </button>
-                            <button class="control-btn" id="screenshotBtn" title="Screenshot">
-                                <i class="fas fa-camera"></i>
-                            </button>
-                            <button class="control-btn" id="recordBtn" title="Record">
-                                <i class="fas fa-record-vinyl"></i>
-                            </button>
-                            <button class="control-btn" id="toggleControlBtn" title="Toggle Control">
-                                <i class="fas fa-mouse-pointer"></i>
-                            </button>
-                            <button class="control-btn" id="toggleSidebarBtn" title="Toggle Sidebar">
-                                <i class="fas fa-bars"></i>
-                            </button>
                         </div>
 
                         <!-- Loading Overlay -->
@@ -994,7 +983,7 @@ class RemoteDesktopApp {
         };
         
         this.config = {
-            wsUrl: `ws://${window.location.hostname}:${window.location.port || '80'}`,
+            wsUrl: `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:${window.location.port || (window.location.protocol === 'https:' ? '443' : '80')}`,
             iceServers: this.buildIceServers(),
             constraints: {
                 video: {
@@ -1035,18 +1024,35 @@ class RemoteDesktopApp {
         // unsolicited host-available/offer before that must not start a PC.
         this._userInitiatedConnect = false;
 
+        // Quiet by default: trace() logs only with ?debug=1 or
+        // localStorage.rdpVerbose=1. Errors always print.
+        this.verbose = (() => {
+            try {
+                if (new URLSearchParams(window.location.search).has('debug')) return true;
+                return localStorage.getItem('rdpVerbose') === '1';
+            } catch (e) { return false; }
+        })();
+
+        // Remote control allowed only when the target host runs this server
+        // (server tells us via hostLocal / control-unavailable).
+        this.controlAllowed = true;
+
         this.init();
     }
     
     // Optional TURN (helps symmetric NAT, but NOT zero-candidate browsers).
     // Set via localStorage: turnUrl, turnUser, turnCred — or ?turn=user:cred@host:port
     buildIceServers() {
-        const servers = [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-        ];
+        // Fully offline by default: LAN host candidates need no STUN server.
+        // Opt-in for Internet use: ?stun=1 or localStorage.rdpStun=1 (Google STUN).
+        const servers = [];
         try {
-            const q = new URLSearchParams(window.location.search).get('turn');
+            const qp = new URLSearchParams(window.location.search);
+            if (qp.has('stun') || localStorage.getItem('rdpStun') === '1') {
+                servers.push({ urls: 'stun:stun.l.google.com:19302' });
+                servers.push({ urls: 'stun:stun1.l.google.com:19302' });
+            }
+            const q = qp.get('turn');
             const url = localStorage.getItem('turnUrl') || (q && `turn:${q.split('@')[1]}`);
             const user = localStorage.getItem('turnUser') || (q && q.split(':')[0]);
             const cred = localStorage.getItem('turnCred') || (q && q.split(':')[1]?.split('@')[0]);
@@ -1060,7 +1066,7 @@ class RemoteDesktopApp {
     init() {
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
-        this.log('Application initialized', 'info');
+        this.log('Application initialized (build ctrl-fix-3: wrapper-cover canvas, video-rect coords)', 'info');
     }
     
     setupEventListeners() {
@@ -1104,7 +1110,7 @@ class RemoteDesktopApp {
             canvas.addEventListener('blur', () => {
                 // Handle releasing keys when focus is lost
                 if (this.state.controlling) {
-                    this.log('Canvas lost focus - releasing keys', 'info');
+                    this.trace('Canvas lost focus - releasing keys', 'info');
                 }
             });
         }
@@ -1200,7 +1206,7 @@ class RemoteDesktopApp {
     handleWebSocketMessage(event) {
         const data = JSON.parse(event.data);
         if (data.type !== 'screen-frame') {
-            this.log(`Received: ${data.type}`, 'info');
+            this.trace(`Received: ${data.type}`, 'info');
         }
 
         switch (data.type) {
@@ -1222,6 +1228,9 @@ class RemoteDesktopApp {
             case 'host-available':
                 this.handleHostAvailable(data);
                 break;
+            case 'host-list':
+                this.handleHostList(data);
+                break;
             case 'client-joined':
                 this.handleClientJoined(data);
                 break;
@@ -1239,6 +1248,9 @@ class RemoteDesktopApp {
                 break;
             case 'screen-frame':
                 this.handleScreenFrame(data);
+                break;
+            case 'control-unavailable':
+                this.handleControlUnavailable(data);
                 break;
             case 'error':
                 this.handleError(data);
@@ -1264,16 +1276,85 @@ class RemoteDesktopApp {
     
     handleRegistered(data) {
         if (this.state.role === 'host') {
-            document.getElementById('sessionId').value = data.clientId;
+            // Show IP address instead of numeric session id.
+            document.getElementById('sessionId').value = data.ip || data.clientId;
+            document.getElementById('hostNumericId').textContent = `ID: ${data.clientId}`;
         }
-        this.log(`Registered with ID: ${data.clientId}`, 'info');
+        this.log(`Registered with ID: ${data.clientId}, IP: ${data.ip || 'n/a'}`, 'info');
+    }
+
+    // Remote control is possible only when the target host runs on the
+    // server machine (RobotJS moves the server's cursor). The server tells
+    // us per host (host-available.hostLocal, host-list[].local); a reactive
+    // control-unavailable message is the backstop.
+    setControlAllowed(allowed, reason) {
+        this.controlAllowed = allowed;
+        if (!allowed && this.state.controlling) this.toggleControl();
+        if (!allowed) {
+            const btn = document.getElementById('enableControlBtn');
+            if (btn) btn.disabled = true;
+            if (reason) this.showNotification(reason, 'warning');
+        }
+    }
+
+    handleControlUnavailable(data) {
+        this.trace(`Control unavailable: ${data.message}`);
+        this.setControlAllowed(false, data.message);
+    }
+
+    // Render viewer host list: "IP (ID: N)" options, keep current selection.
+    // Hosts without a local server are marked view-only (no remote control).
+    handleHostList(data) {
+        if (this.state.role !== 'client') return;
+        const select = document.getElementById('hostSelect');
+        if (!select) return;
+        const prev = select.value || this.connectedPeerId?.toString() || '';
+        const hosts = (data.hosts || []).slice().sort((a, b) => a.hostId - b.hostId);
+        select.innerHTML = '';
+        if (hosts.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'No hosts online';
+            select.appendChild(opt);
+        } else {
+            hosts.forEach(h => {
+                const opt = document.createElement('option');
+                opt.value = String(h.hostId);
+                const steerable = h.local !== false;
+                opt.textContent = steerable ? `${h.ip} (ID: ${h.hostId})` : `${h.ip} (ID: ${h.hostId}) — view only`;
+                opt.dataset.local = steerable ? 'true' : 'false';
+                select.appendChild(opt);
+            });
+            // Restore previous selection, else pick first host.
+            if (prev && hosts.some(h => String(h.hostId) === prev)) {
+                select.value = prev;
+            } else {
+                select.selectedIndex = 0;
+                this.availableHostId = select.value;
+            }
+        }
+        this.trace(`[CLIENT] host list: ${hosts.map(h => `${h.ip}#${h.hostId}`).join(', ') || 'empty'}`, 'info');
     }
     
     // Screen sharing for host
     async startScreenShare() {
         try {
             this.showLoading(true);
-            
+
+            // getDisplayMedia exists only in secure contexts (https/localhost).
+            // Plain http://<lan-ip> hides navigator.mediaDevices entirely.
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                const msg = `Screen sharing blocked: insecure context (${window.location.protocol}//${window.location.host}, secure=${window.isSecureContext}). ` +
+                    `On the HOST machine open http://localhost:${window.location.port || '9000'} — or serve HTTPS (see server log). Viewers are unaffected.`;
+                this.log(msg, 'error');
+                this.updateStatus('Screen sharing blocked: open via localhost or HTTPS', false);
+                this.showNotification('Sharing needs localhost or HTTPS — see log', 'error');
+                this.showLoading(false);
+                const startBtn = document.getElementById('startShareBtn');
+                if (startBtn) startBtn.disabled = false;
+                return;
+            }
+
             const constraints = {
                 video: {
                     ...this.config.constraints.video,
@@ -1298,7 +1379,6 @@ class RemoteDesktopApp {
             this.sendMessage({ type: 'host-ready' });
             
             this.showLoading(false);
-            this.showNotification('Screen sharing started', 'success');
             this.setupPeerConnection();
             
         } catch (error) {
@@ -1331,7 +1411,7 @@ class RemoteDesktopApp {
     // ---- WS-relay fallback: MJPEG from localVideo, no WebRTC needed ----
     handleFallbackRequest(data) {
         if (this.state.role !== 'host' || !this.state.streaming) {
-            this.log('[FALLBACK] request ignored (not streaming host)', 'info');
+            this.trace('[FALLBACK] request ignored (not streaming host)', 'info');
             return;
         }
         this.log(`[FALLBACK] viewer ${data.fromId} asked for relay, starting`, 'info');
@@ -1406,7 +1486,7 @@ class RemoteDesktopApp {
         if (img) img.classList.remove('hidden');
         document.getElementById('videoControls')?.classList.remove('hidden');
         const btn = document.getElementById('enableControlBtn');
-        if (btn) btn.disabled = false;
+        if (btn) btn.disabled = !this.controlAllowed;
         this.showLoading(false);
     }
 
@@ -1426,7 +1506,7 @@ class RemoteDesktopApp {
         const now = Date.now();
         if (now - this.fallback.lastFpsLog > 5000) {
             const fps = (this.fallback.frames * 1000 / (now - this.fallback.lastFpsLog)).toFixed(1);
-            this.log(`[FALLBACK] relay fps=${fps} size=${data.w}x${data.h}`, 'info');
+            this.trace(`[FALLBACK] relay fps=${fps} size=${data.w}x${data.h}`, 'info');
             this.fallback.frames = 0;
             this.fallback.lastFpsLog = now;
         }
@@ -1442,15 +1522,19 @@ class RemoteDesktopApp {
     
     // Client connection
     async connect() {
-        const hostId = document.getElementById('hostIdInput').value.trim();
+        const select = document.getElementById('hostSelect');
+        const hostId = (select?.value || '').trim();
         if (!hostId) {
-            this.showNotification('Please enter a host ID', 'warning');
+            this.showNotification('No hosts online — wait for a host to share', 'warning');
             return;
         }
+        // Preselect control availability from the list; the server confirms
+        // via host-available / control-unavailable.
+        this.setControlAllowed(select.selectedOptions?.[0]?.dataset?.local !== 'false');
 
         // Allow retry: drop stale PC so the fresh offer has clean state.
         if (this.connection.pc) {
-            this.log('[CONNECT] Closing stale PC before new attempt', 'info');
+            this.trace('[CONNECT] Closing stale PC before new attempt', 'info');
             this.closePeerConnection();
         }
         // Drop previous remote frame so a dead stream never shows as 2x2 black.
@@ -1494,30 +1578,30 @@ class RemoteDesktopApp {
         this._pendingIce = [];
         this._handlingOffer = false;
 
-        this.log(`[SETUP_PC] Creating peer connection for role=${this.state.role}, localStream=${!!this.connection.localStream}, peer=${this.connectedPeerId}`, 'info');
+        this.trace(`[SETUP_PC] Creating peer connection for role=${this.state.role}, localStream=${!!this.connection.localStream}, peer=${this.connectedPeerId}`, 'info');
         this.connection.pc = new RTCPeerConnection({
             iceServers: this.config.iceServers
         });
 
         this.connection.pc.onicecandidate = (event) => {
             if (event.candidate) {
-                this.log(`[SETUP_PC] Sending ICE candidate to ${this.connectedPeerId}: ${event.candidate.candidate}`, 'info');
+                this.trace(`[SETUP_PC] Sending ICE candidate to ${this.connectedPeerId}: ${event.candidate.candidate}`, 'info');
                 this.sendMessage({
                     type: 'ice-candidate',
                     candidate: event.candidate,
                     targetId: this.connectedPeerId
                 });
             } else {
-                this.log('[SETUP_PC] ICE gathering complete (null candidate)', 'info');
+                this.trace('[SETUP_PC] ICE gathering complete (null candidate)', 'info');
             }
         };
 
         this.connection.pc.onicegatheringstatechange = () => {
-            this.log(`ICE gathering state: ${this.connection.pc.iceGatheringState}`, 'info');
+            this.trace(`ICE gathering state: ${this.connection.pc.iceGatheringState}`, 'info');
         };
 
         this.connection.pc.ontrack = (event) => {
-            this.log(`[SETUP_PC] ontrack: streams=${event.streams?.length}, track=${event.track?.kind}, muted=${event.track?.muted}`, 'info');
+            this.trace(`[SETUP_PC] ontrack: streams=${event.streams?.length}, track=${event.track?.kind}, muted=${event.track?.muted}`, 'info');
             // Some browsers fire ontrack without streams — wrap track in a stream then.
             const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
             this.handleRemoteStream(stream);
@@ -1525,7 +1609,7 @@ class RemoteDesktopApp {
 
         this.connection.pc.oniceconnectionstatechange = () => {
             const st = this.connection.pc.iceConnectionState;
-            this.log(`ICE state: ${st}`, 'info');
+            this.trace(`ICE state: ${st}`, 'info');
             if (st === 'failed') {
                 this.log('ICE failed — requesting WS relay fallback', 'error');
                 this.maybeStartFallback();
@@ -1541,7 +1625,7 @@ class RemoteDesktopApp {
         };
 
         this.connection.pc.onconnectionstatechange = () => {
-            this.log(`PC state: ${this.connection.pc.connectionState}`, 'info');
+            this.trace(`PC state: ${this.connection.pc.connectionState}`, 'info');
         };
         
         // Setup data channel for control
@@ -1557,7 +1641,7 @@ class RemoteDesktopApp {
         
         // Add local stream if host
         if (this.state.role === 'host' && this.connection.localStream) {
-            this.log(`[SETUP_PC] Adding local stream tracks`, 'info');
+            this.trace(`[SETUP_PC] Adding local stream tracks`, 'info');
             this.connection.localStream.getTracks().forEach(track => {
                 this.connection.pc.addTrack(track, this.connection.localStream);
             });
@@ -1568,7 +1652,7 @@ class RemoteDesktopApp {
             if (this.connectedPeerId) {
                 this.createOffer();
             } else {
-                this.log('[SETUP_PC] No peer yet, waiting for client-joined before offer', 'info');
+                this.trace('[SETUP_PC] No peer yet, waiting for client-joined before offer', 'info');
             }
         }
     }
@@ -1596,15 +1680,15 @@ class RemoteDesktopApp {
             }
             // Don't stack offers: if we already wait for an answer, skip.
             if (this.connection.pc.signalingState !== 'stable') {
-                this.log(`[CREATE_OFFER] Skipped, signalingState=${this.connection.pc.signalingState}`, 'info');
+                this.trace(`[CREATE_OFFER] Skipped, signalingState=${this.connection.pc.signalingState}`, 'info');
                 return;
             }
-            this.log(`[CREATE_OFFER] Creating offer for peer ${this.connectedPeerId}`, 'info');
+            this.trace(`[CREATE_OFFER] Creating offer for peer ${this.connectedPeerId}`, 'info');
             const offer = await this.connection.pc.createOffer();
             await this.connection.pc.setLocalDescription(offer);
-            this.log(`[CREATE_OFFER] local SDP has video=${this.connection.pc.localDescription.sdp.includes('m=video')}, gathering=${this.connection.pc.iceGatheringState}`, 'info');
+            this.trace(`[CREATE_OFFER] local SDP has video=${this.connection.pc.localDescription.sdp.includes('m=video')}, gathering=${this.connection.pc.iceGatheringState}`, 'info');
 
-            this.log(`[CREATE_OFFER] Sending offer to ${this.connectedPeerId}`, 'info');
+            this.trace(`[CREATE_OFFER] Sending offer to ${this.connectedPeerId}`, 'info');
             this.sendMessage({
                 type: 'offer',
                 offer: this.connection.pc.localDescription,
@@ -1626,26 +1710,26 @@ class RemoteDesktopApp {
                 this.log(`Flush ICE error: ${e}`, 'error');
             }
         });
-        this.log(`Flushed ${queued.length} queued ICE candidates`, 'info');
+        this.trace(`Flushed ${queued.length} queued ICE candidates`, 'info');
     }
 
     async handleOffer(data) {
         // Guard against parallel duplicate offers (register + manual connect
         // each trigger host-available → two offers back-to-back).
         if (this._handlingOffer) {
-            this.log('[CLIENT] handleOffer skipped, already handling one', 'info');
+            this.trace('[CLIENT] handleOffer skipped, already handling one', 'info');
             return;
         }
         // Unsolicited offer before user clicked Connect (server notifies host
         // on register) — ignore it; the real handshake starts at Connect.
         // Host rebuilds its PC on the explicit client-joined, so nothing is lost.
         if (this.state.role === 'client' && !this._userInitiatedConnect && !this.connection.pc) {
-            this.log(`[CLIENT] Unsolicited offer from ${data.fromId} ignored (click Connect first)`, 'info');
+            this.trace(`[CLIENT] Unsolicited offer from ${data.fromId} ignored (click Connect first)`, 'info');
             return;
         }
         this._handlingOffer = true;
         try {
-            this.log(`[CLIENT] handleOffer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, pcState=${this.connection.pc?.connectionState}, signaling=${this.connection.pc?.signalingState}`, 'info');
+            this.trace(`[CLIENT] handleOffer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, pcState=${this.connection.pc?.connectionState}, signaling=${this.connection.pc?.signalingState}`, 'info');
             this.connectedPeerId = data.fromId;
 
             // Client may get offer before ever creating PC (host was faster).
@@ -1654,7 +1738,7 @@ class RemoteDesktopApp {
             }
             // Glare: if we are not stable, roll back to accept the new offer.
             if (this.connection.pc.signalingState !== 'stable') {
-                this.log(`[CLIENT] signaling=${this.connection.pc.signalingState}, rollback`, 'info');
+                this.trace(`[CLIENT] signaling=${this.connection.pc.signalingState}, rollback`, 'info');
                 try {
                     await this.connection.pc.setLocalDescription({ type: 'rollback' });
                 } catch (e) {
@@ -1664,15 +1748,15 @@ class RemoteDesktopApp {
             }
 
             await this.connection.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-            this.log(`[CLIENT] Set remote description (offer)`, 'info');
-            this.log(`[CLIENT] remote SDP has video=${this.connection.pc.remoteDescription.sdp.includes('m=video')}, receivers=${this.connection.pc.getReceivers().map(r => r.track?.kind + '/' + r.track?.readyState).join(',')}`, 'info');
+            this.trace(`[CLIENT] Set remote description (offer)`, 'info');
+            this.trace(`[CLIENT] remote SDP has video=${this.connection.pc.remoteDescription.sdp.includes('m=video')}, receivers=${this.connection.pc.getReceivers().map(r => r.track?.kind + '/' + r.track?.readyState).join(',')}`, 'info');
             this._flushPendingIce();
 
             const answer = await this.connection.pc.createAnswer();
             await this.connection.pc.setLocalDescription(answer);
-            this.log(`[CLIENT] Created and set local description (answer)`, 'info');
+            this.trace(`[CLIENT] Created and set local description (answer)`, 'info');
 
-            this.log(`[CLIENT] Sending answer to ${data.fromId}`, 'info');
+            this.trace(`[CLIENT] Sending answer to ${data.fromId}`, 'info');
             this.sendMessage({
                 type: 'answer',
                 answer: this.connection.pc.localDescription,
@@ -1693,15 +1777,15 @@ class RemoteDesktopApp {
 
     async handleAnswer(data) {
         try {
-            this.log(`[HOST] handleAnswer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, signaling=${this.connection.pc?.signalingState}`, 'info');
+            this.trace(`[HOST] handleAnswer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, signaling=${this.connection.pc?.signalingState}`, 'info');
             if (!this.connection.pc) return;
             // Ignore late/duplicate answers.
             if (this.connection.pc.signalingState !== 'have-local-offer') {
-                this.log(`[HOST] Ignored answer, signaling=${this.connection.pc.signalingState}`, 'info');
+                this.trace(`[HOST] Ignored answer, signaling=${this.connection.pc.signalingState}`, 'info');
                 return;
             }
             await this.connection.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-            this.log(`[HOST] Set remote description (answer)`, 'info');
+            this.trace(`[HOST] Set remote description (answer)`, 'info');
             this._flushPendingIce();
         } catch (error) {
             this.log(`Handle answer error: ${error}`, 'error');
@@ -1711,7 +1795,7 @@ class RemoteDesktopApp {
     async handleIceCandidate(data) {
         try {
             if (!this.connection.pc) {
-                this.log('[ICE] No PC yet, dropping candidate', 'info');
+                this.trace('[ICE] No PC yet, dropping candidate', 'info');
                 return;
             }
             // Candidates arriving before remote description must be queued,
@@ -1719,21 +1803,21 @@ class RemoteDesktopApp {
             if (!this.connection.pc.remoteDescription) {
                 this._pendingIce = this._pendingIce || [];
                 this._pendingIce.push(data.candidate);
-                this.log(`[ICE] Queued candidate (no remote yet), queue=${this._pendingIce.length}`, 'info');
+                this.trace(`[ICE] Queued candidate (no remote yet), queue=${this._pendingIce.length}`, 'info');
                 return;
             }
-            this.log(`[ICE] Received candidate from ${data.fromId}: ${data.candidate?.candidate?.substring(0, 50)}...`, 'info');
+            this.trace(`[ICE] Received candidate from ${data.fromId}: ${data.candidate?.candidate?.substring(0, 50)}...`, 'info');
             await this.connection.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-            this.log(`[ICE] Added candidate`, 'info');
+            this.trace(`[ICE] Added candidate`, 'info');
         } catch (error) {
             this.log(`Handle ICE candidate error: ${error}`, 'error');
         }
     }
 
     handleRemoteStream(stream) {
-        this.log(`[REMOTE_STREAM] Received stream: id=${stream.id}, tracks=${stream.getTracks().length}`, 'info');
+        this.trace(`[REMOTE_STREAM] Received stream: id=${stream.id}, tracks=${stream.getTracks().length}`, 'info');
         stream.getTracks().forEach((t, i) => {
-            this.log(`[REMOTE_STREAM] Track ${i}: kind=${t.kind}, enabled=${t.enabled}, readyState=${t.readyState}, muted=${t.muted}`, 'info');
+            this.trace(`[REMOTE_STREAM] Track ${i}: kind=${t.kind}, enabled=${t.enabled}, readyState=${t.readyState}, muted=${t.muted}`, 'info');
             // Unmute callback helps diagnose frozen frames.
             t.onunmute = () => {
                 this.log(`[REMOTE_STREAM] Track ${t.kind} unmuted — frames flowing`, 'info');
@@ -1743,14 +1827,14 @@ class RemoteDesktopApp {
                     this.stopFallbackView(true);
                 }
             };
-            t.onmute = () => this.log(`[REMOTE_STREAM] Track ${t.kind} muted`, 'info');
+            t.onmute = () => this.trace(`[REMOTE_STREAM] Track ${t.kind} muted`, 'info');
         });
         this.connection.remoteStream = stream;
         const remoteVideo = document.getElementById('remoteVideo');
         // FIX for AbortError + black screen: don't reassign same stream,
         // ensure muted/playsInline for autoplay, play only when ready.
         if (remoteVideo.srcObject === stream && !remoteVideo.paused) {
-            this.log('[REMOTE_STREAM] Same stream already playing, skip', 'info');
+            this.trace('[REMOTE_STREAM] Same stream already playing, skip', 'info');
             return;
         }
         remoteVideo.muted = true;
@@ -1763,7 +1847,7 @@ class RemoteDesktopApp {
                 remoteVideo.play().catch(err => {
                     if (err && err.name === 'AbortError') {
                         // New load interrupted us — retry once video can play.
-                        this.log('play() aborted, will retry on canplay', 'info');
+                        this.trace('play() aborted, will retry on canplay', 'info');
                     } else {
                         this.log(`Error playing video: ${err}`, 'error');
                     }
@@ -1775,8 +1859,9 @@ class RemoteDesktopApp {
         } else {
             remoteVideo.oncanplay = tryPlay;
         }
-        document.getElementById('videoControls').classList.remove('hidden');
-        document.getElementById('enableControlBtn').disabled = false;
+        document.getElementById('videoControls')?.classList.remove('hidden');
+        const ctrlBtn = document.getElementById('enableControlBtn');
+        if (ctrlBtn) ctrlBtn.disabled = !this.controlAllowed;
         this.showLoading(false);
         this.showNotification('Connected to remote screen', 'success');
         this.isConnecting = false;
@@ -1848,6 +1933,10 @@ class RemoteDesktopApp {
     
     // Remote control
     toggleControl() {
+        if (!this.state.controlling && !this.controlAllowed) {
+            this.showNotification('Remote control unavailable: host runs no server', 'warning');
+            return;
+        }
         this.state.controlling = !this.state.controlling;
         const btn = document.getElementById('enableControlBtn');
         const toggleBtn = document.getElementById('toggleControlBtn');
@@ -1893,78 +1982,74 @@ class RemoteDesktopApp {
     
     handleMouseMove(event) {
         if (!this.state.controlling) return;
-        
-        const rect = event.target.getBoundingClientRect();
-        const canvasX = event.clientX - rect.left;
-        const canvasY = event.clientY - rect.top;
-        
-        // Convert to normalized video coordinates
-        const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-        
+
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
         // Throttle mouse move events
         this.throttle(() => {
             this.sendControlCommand('mousemove', { x: coords.x, y: coords.y });
         }, 30);
     }
-    
+
     handleMouseDown(event) {
         if (!this.state.controlling) return;
-        
-        const rect = event.target.getBoundingClientRect();
-        const canvasX = event.clientX - rect.left;
-        const canvasY = event.clientY - rect.top;
-        
-        // Convert to normalized video coordinates
-        const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-        
-        this.log(`Mouse down at ${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}, button: ${event.button}`, 'info');
+
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
+        this.trace(`Mouse down at ${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}, button: ${event.button}`, 'info');
         this.sendControlCommand('mousedown', { x: coords.x, y: coords.y, button: event.button });
-        
+
         // Focus canvas to capture keyboard events
         event.target.focus();
     }
-    
+
     handleMouseUp(event) {
         if (!this.state.controlling) return;
-        
-        const rect = event.target.getBoundingClientRect();
-        const canvasX = event.clientX - rect.left;
-        const canvasY = event.clientY - rect.top;
-        
-        // Convert to normalized video coordinates
-        const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-        
-        this.log(`Mouse up at ${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}, button: ${event.button}`, 'info');
+
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
+        this.trace(`Mouse up at ${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}, button: ${event.button}`, 'info');
         this.sendControlCommand('mouseup', { x: coords.x, y: coords.y, button: event.button });
     }
-    
+
     handleWheel(event) {
         if (!this.state.controlling) return;
-        
+
         event.preventDefault();
-        const rect = event.target.getBoundingClientRect();
-        const canvasX = event.clientX - rect.left;
-        const canvasY = event.clientY - rect.top;
-        
-        // Convert to normalized video coordinates
-        const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-        
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
         this.sendControlCommand('wheel', { x: coords.x, y: coords.y, deltaY: event.deltaY });
     }
     
     sendControlCommand(type, data) {
-        // Send via WebSocket instead of data channel for more reliability
+        // Send via WebSocket instead of data channel for more reliability.
+        // targetId lets the server route input to the right host and run
+        // RobotJS only when that host IS the server machine.
         this.sendMessage({
             type: 'control',
             action: type,
-            ...data
+            ...data,
+            targetId: this.connectedPeerId
         });
-        this.log(`Sent control: ${type}`, 'info');
+        // 1/sec coordinate trace for control debugging (compare with server log).
+        if (type === 'mousemove' && data && typeof data.x === 'number') {
+            const now = Date.now();
+            if (!this._mouseTraceT || now - this._mouseTraceT > 1000) {
+                this._mouseTraceT = now;
+                this.trace(`[TRACE] mouse out x=${data.x.toFixed(3)} y=${data.y.toFixed(3)}`, 'info');
+            }
+        } else {
+            this.trace(`Sent control: ${type}`, 'info');
+        }
     }
     
     processControlCommand(command) {
         // Host processes control commands here
-        this.log(`Control command: ${command.type}`, 'info');
+        this.trace(`Control command: ${command.type}`, 'info');
     }
     
     // UI controls
@@ -1982,11 +2067,11 @@ class RemoteDesktopApp {
         const headerBtn = document.getElementById('headerFullscreenBtn');
         
         if (this.state.fullscreen) {
-            if (btn) btn.innerHTML = '<i class="fas fa-compress"></i>';
-            if (headerBtn) headerBtn.innerHTML = '<i class="fas fa-compress"></i>';
+            if (btn) btn.innerHTML = '<span class="ic">⤡</span>';
+            if (headerBtn) headerBtn.innerHTML = '<span class="ic">⤡</span>';
         } else {
-            if (btn) btn.innerHTML = '<i class="fas fa-expand"></i>';
-            if (headerBtn) headerBtn.innerHTML = '<i class="fas fa-expand"></i>';
+            if (btn) btn.innerHTML = '<span class="ic">⤢</span>';
+            if (headerBtn) headerBtn.innerHTML = '<span class="ic">⤢</span>';
         }
         
         this.resizeCanvas();
@@ -2069,8 +2154,8 @@ class RemoteDesktopApp {
         if (btn) btn.classList.add('active');
         if (headerBtn) headerBtn.classList.add('active');
         
-        if (btn) btn.innerHTML = '<i class="fas fa-stop"></i>';
-        if (headerBtn) headerBtn.innerHTML = '<i class="fas fa-stop"></i>';
+        if (btn) btn.innerHTML = '<span class="ic">■</span>';
+        if (headerBtn) headerBtn.innerHTML = '<span class="ic">■</span>';
         
         this.showNotification('Recording started', 'info');
     }
@@ -2086,8 +2171,8 @@ class RemoteDesktopApp {
             if (btn) btn.classList.remove('active');
             if (headerBtn) headerBtn.classList.remove('active');
             
-            if (btn) btn.innerHTML = '<i class="fas fa-record-vinyl"></i>';
-            if (headerBtn) headerBtn.innerHTML = '<i class="fas fa-record-vinyl"></i>';
+            if (btn) btn.innerHTML = '<span class="ic rec">●</span>';
+            if (headerBtn) headerBtn.innerHTML = '<span class="ic rec">●</span>';
             
             this.showNotification('Recording saved', 'success');
         }
@@ -2206,30 +2291,77 @@ class RemoteDesktopApp {
                 }
             }
 
-            // Set canvas to match the container (skip if unchanged — frames
-            // arrive ~5/s and must not thrash layout/log on every one).
+            // The canvas always covers the whole wrapper (see CSS inset:0).
+            // Pointer mapping is computed against the VIDEO rect, never the
+            // canvas box, so canvas placement can no longer skew coordinates.
+            const parent = canvas.offsetParent;
+            const pw = parent ? Math.round(parent.clientWidth) : 0;
+            const ph = parent ? Math.round(parent.clientHeight) : 0;
             const last = this._lastCanvasSize;
-            if (!last || Math.abs(last.w - rect.width) > 1 || Math.abs(last.h - rect.height) > 1) {
-                canvas.width = rect.width;
-                canvas.height = rect.height;
-                canvas.style.width = `${rect.width}px`;
-                canvas.style.height = `${rect.height}px`;
-                canvas.style.left = `${rect.left}px`;
-                canvas.style.top = `${rect.top}px`;
-                this._lastCanvasSize = { w: rect.width, h: rect.height };
+            if (!last || last.w !== pw || last.h !== ph) {
+                canvas.width = Math.max(1, pw);
+                canvas.height = Math.max(1, ph);
+                canvas.style.left = '0px';
+                canvas.style.top = '0px';
+                canvas.style.width = '100%';
+                canvas.style.height = '100%';
+                canvas.style.right = 'auto';
+                canvas.style.bottom = 'auto';
+                this._lastCanvasSize = { w: pw, h: ph };
 
-                this.log(`Canvas resized to ${rect.width}x${rect.height}, video: ${vw}x${vh}`, 'info');
+                this.trace(`Canvas covers wrapper ${pw}x${ph}, video: ${vw}x${vh} at ${Math.round(rect.width)}x${Math.round(rect.height)}`, 'info');
                 if (this.videoDisplayInfo.offsetX > 0 || this.videoDisplayInfo.offsetY > 0) {
-                    this.log(`Letterboxing detected: offsetX=${this.videoDisplayInfo.offsetX}, offsetY=${this.videoDisplayInfo.offsetY}`, 'info');
+                    this.trace(`Letterboxing detected: offsetX=${this.videoDisplayInfo.offsetX}, offsetY=${this.videoDisplayInfo.offsetY}`, 'info');
                 }
             }
         }
     }
     
-    // Helper to convert canvas coordinates to normalized video coordinates
+    // Normalized (0-1) pointer position relative to the VIDEO/frame rect —
+    // deliberately NOT the canvas box, so canvas placement can never skew
+    // control coordinates (the historical "cursor snaps to border" cause).
+    // Output is always clamped; null when no picture is on screen.
+    eventCoords(event) {
+        const video = document.getElementById('remoteVideo');
+        const img = document.getElementById('fallbackImg');
+        let ref = null;
+        if (video && video.srcObject && video.videoWidth) {
+            ref = video;
+        } else if (img && !img.classList.contains('hidden') && img.naturalWidth) {
+            ref = img;
+        }
+        if (!ref) return null;
+        const box = ref.getBoundingClientRect();
+        if (!box.width || !box.height) return null;
+        const p = (event.touches && event.touches[0]) ||
+                  (event.changedTouches && event.changedTouches[0]) || event;
+        if (typeof p.clientX !== 'number' || typeof p.clientY !== 'number') return null;
+        const x = (p.clientX - box.left) / box.width;
+        const y = (p.clientY - box.top) / box.height;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+    }
+
+    // Geometry self-check for the console: app.diagnoseOverlay()
+    diagnoseOverlay() {
+        const fmt = (el) => {
+            if (!el) return 'missing';
+            const b = el.getBoundingClientRect();
+            return `${el.tagName}#${el.id || el.className} @${Math.round(b.left)},${Math.round(b.top)} ${Math.round(b.width)}x${Math.round(b.height)}`;
+        };
+        const c = document.getElementById('controlCanvas');
+        const v = document.getElementById('remoteVideo');
+        const img = document.getElementById('fallbackImg');
+        this.log(`DIAG canvas=${fmt(c)} pe=${c && c.style.pointerEvents}`, 'info');
+        this.log(`DIAG video=${fmt(v)} src=${!!(v && v.srcObject)} vw=${v && v.videoWidth}x${v && v.videoHeight}`, 'info');
+        this.log(`DIAG img=${fmt(img)} shown=${img && !img.classList.contains('hidden')} nat=${img && img.naturalWidth}x${img && img.naturalHeight}`, 'info');
+        this.log(`DIAG offsetParent=${c && c.offsetParent ? c.offsetParent.tagName + '.' + c.offsetParent.className : 'null'} controlling=${this.state.controlling} build=ctrl-fix-3`, 'info');
+    }
+
+    // Kept for compatibility; use eventCoords() for new code.
     canvasToVideoCoordinates(canvasX, canvasY) {
-        if (!this.videoDisplayInfo) return { x: canvasX, y: canvasY };
-        
+        if (!this.videoDisplayInfo) return null;
+
         const info = this.videoDisplayInfo;
         
         // Check if click is outside the actual video area
@@ -2240,26 +2372,38 @@ class RemoteDesktopApp {
             const y = Math.max(info.offsetY, Math.min(info.containerHeight - info.offsetY, canvasY));
             
             // Convert to normalized coordinates (0-1)
-            return {
-                x: (x - info.offsetX) / (info.containerWidth - 2 * info.offsetX),
-                y: (y - info.offsetY) / (info.containerHeight - 2 * info.offsetY)
-            };
+            return this._clampNorm(
+                (x - info.offsetX) / (info.containerWidth - 2 * info.offsetX),
+                (y - info.offsetY) / (info.containerHeight - 2 * info.offsetY)
+            );
         }
-        
+
         // Convert to normalized coordinates (0-1)
-        return {
-            x: (canvasX - info.offsetX) / (info.containerWidth - 2 * info.offsetX),
-            y: (canvasY - info.offsetY) / (info.containerHeight - 2 * info.offsetY)
-        };
+        return this._clampNorm(
+            (canvasX - info.offsetX) / (info.containerWidth - 2 * info.offsetX),
+            (canvasY - info.offsetY) / (info.containerHeight - 2 * info.offsetY)
+        );
     }
-    
+
+    _clampNorm(x, y) {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+    }
+
     throttle(func, delay) {
-        if (!this.throttleTimer) {
-            func();
-            this.throttleTimer = setTimeout(() => {
-                this.throttleTimer = null;
-            }, delay);
-        }
+        // Leading + trailing: send immediately, and if more input arrived
+        // during the window, flush the latest at the end (no lost tail).
+        this._throttleLatest = func;
+        if (this.throttleTimer) return;
+        const head = this._throttleLatest;
+        this._throttleLatest = null;
+        if (head) head();
+        this.throttleTimer = setTimeout(() => {
+            this.throttleTimer = null;
+            const tail = this._throttleLatest;
+            this._throttleLatest = null;
+            if (tail) tail();
+        }, delay);
     }
     
     showLoading(show) {
@@ -2290,7 +2434,7 @@ class RemoteDesktopApp {
         
         notification.className = `notification ${type}`;
         notification.innerHTML = `
-            <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
+            <span class="ic">${type === 'success' ? '✔' : type === 'error' ? '✖' : 'ℹ'}</span>
             <span>${message}</span>
         `;
         
@@ -2304,8 +2448,12 @@ class RemoteDesktopApp {
     
     log(message, level = 'info') {
         const timestamp = new Date().toLocaleTimeString();
-        console.log(`[${timestamp}] ${message}`);
-        
+        // DevTools console stays quiet for routine info; errors/warnings
+        // and verbose mode still print. Debug panel keeps everything.
+        if (this.verbose || level !== 'info') {
+            console.log(`[${timestamp}] ${message}`);
+        }
+
         const debugContent = document.getElementById('debugContent');
         if (debugContent) {
             const entry = document.createElement('div');
@@ -2314,6 +2462,11 @@ class RemoteDesktopApp {
             debugContent.appendChild(entry);
             debugContent.scrollTop = debugContent.scrollHeight;
         }
+    }
+
+    // Verbose-only logging for routine chatter (candidates, resizes, keys).
+    trace(message) {
+        if (this.verbose) this.log(message, 'info');
     }
     
     closePeerConnection() {
@@ -2360,21 +2513,31 @@ class RemoteDesktopApp {
 
     // Handle host available (when client connects to a host)
     handleHostAvailable(data) {
-        this.log(`[CLIENT] handleHostAvailable: hostId=${data.hostId}, role=${this.state.role}, streaming=${this.state.streaming}`, 'info');
+        this.trace(`[CLIENT] handleHostAvailable: hostId=${data.hostId}, role=${this.state.role}, streaming=${this.state.streaming}`, 'info');
         if (this.state.role !== 'client') return;
         // Auto host-available on register (before user clicks Connect) —
         // only remember the id, don't start WebRTC yet (avoids double handshake).
         if (!this._userInitiatedConnect) {
             this.availableHostId = data.hostId;
-            const input = document.getElementById('hostIdInput');
-            if (input && !input.value) input.value = data.hostId;
-            this.showNotification(`Host ${data.hostId} available — click Connect`, 'info');
+            const select = document.getElementById('hostSelect');
+            if (select) {
+                const opt = [...select.options].find(o => o.value === String(data.hostId));
+                if (opt) select.value = opt.value;
+            }
+            this.showNotification(`Host available — click Connect`, 'info');
             return;
         }
         // Ignore duplicate host-available for the same peer with live PC.
         if (this.connectedPeerId === data.hostId && this.connection.pc) {
-            this.log('[CLIENT] Duplicate host-available ignored', 'info');
+            this.trace('[CLIENT] Duplicate host-available ignored', 'info');
             return;
+        }
+        // Proactively gate remote control: only hosts on the server machine
+        // are steerable (missing field = old server, assume allowed).
+        if (data.hostLocal === false) {
+            this.setControlAllowed(false, 'Host has no server — viewing only, control disabled');
+        } else {
+            this.setControlAllowed(true);
         }
         this.connectedPeerId = data.hostId;
         this.setupPeerConnection();
@@ -2382,7 +2545,7 @@ class RemoteDesktopApp {
 
     // Handle client joined (when a client connects to the host)
     handleClientJoined(data) {
-        this.log(`[HOST] handleClientJoined: clientId=${data.clientId}, role=${this.state.role}, streaming=${this.state.streaming}, pcExists=${!!this.connection.pc}`, 'info');
+        this.trace(`[HOST] handleClientJoined: clientId=${data.clientId}, role=${this.state.role}, streaming=${this.state.streaming}, pcExists=${!!this.connection.pc}`, 'info');
         if (this.state.role !== 'host') return;
         this.connectedPeerId = data.clientId;
 
@@ -2390,7 +2553,7 @@ class RemoteDesktopApp {
             // FIX: rebuild PC so the offer always matches current tracks/ufrag.
             // Reusing a PC that already did setLocal(offer) with no peer
             // is the main black-screen cause.
-            this.log(`[HOST] (Re)creating PC + offer for client ${data.clientId}`, 'info');
+            this.trace(`[HOST] (Re)creating PC + offer for client ${data.clientId}`, 'info');
             this.setupPeerConnection();
         }
     }
@@ -2398,51 +2561,34 @@ class RemoteDesktopApp {
     handleTouchStart(event) {
         if (!this.state.controlling) return;
         event.preventDefault();
-        
-        const touch = event.touches[0];
-        const rect = event.target.getBoundingClientRect();
-        const canvasX = touch.clientX - rect.left;
-        const canvasY = touch.clientY - rect.top;
-        
-        // Convert to normalized video coordinates
-        const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-        
-        this.log(`Touch start at ${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}`, 'info');
+
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
+        this.trace(`Touch start at ${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}`, 'info');
         this.sendControlCommand('mousedown', { x: coords.x, y: coords.y, button: 0 });
     }
-    
+
     handleTouchMove(event) {
         if (!this.state.controlling) return;
         event.preventDefault();
-        
-        const touch = event.touches[0];
-        const rect = event.target.getBoundingClientRect();
-        const canvasX = touch.clientX - rect.left;
-        const canvasY = touch.clientY - rect.top;
-        
-        // Convert to normalized video coordinates
-        const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-        
+
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
         this.throttle(() => {
             this.sendControlCommand('mousemove', { x: coords.x, y: coords.y });
         }, 30);
     }
-    
+
     handleTouchEnd(event) {
         if (!this.state.controlling) return;
         event.preventDefault();
-        
-        if (event.changedTouches.length > 0) {
-            const touch = event.changedTouches[0];
-            const rect = event.target.getBoundingClientRect();
-            const canvasX = touch.clientX - rect.left;
-            const canvasY = touch.clientY - rect.top;
-            
-            // Convert to normalized video coordinates
-            const coords = this.canvasToVideoCoordinates(canvasX, canvasY);
-            
-            this.sendControlCommand('mouseup', { x: coords.x, y: coords.y, button: 0 });
-        }
+
+        const coords = this.eventCoords(event);
+        if (!coords) return;
+
+        this.sendControlCommand('mouseup', { x: coords.x, y: coords.y, button: 0 });
     }
     
     // New method for keyboard events
@@ -2464,7 +2610,7 @@ class RemoteDesktopApp {
             metaKey: event.metaKey
         };
         
-        this.log(`Key ${type}: ${event.key} (${event.code})`, 'info');
+        this.trace(`Key ${type}: ${event.key} (${event.code})`, 'info');
         this.sendControlCommand(type, keyData);
     }
 }

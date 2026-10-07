@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "robotjs": "^0.9.1",
+    "selfsigned": "^2.4.1",
     "ws": "^8.18.2"
   },
   "devDependencies": {
@@ -22,8 +23,13 @@
     "pkg": "^5.8.1"
   },
   "pkg": {
-    "assets": ["index.html", "app.js", "style.css"],
-    "targets": ["node18-win-x64"],
+    "assets": [
+      "index.html",
+      "config.ini"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
     "outputPath": "dist"
   }
 }
