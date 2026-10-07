@@ -188,7 +188,10 @@ wss.on('connection', (ws, req) => {
             }
             
             const data = JSON.parse(message);
-            console.log(`[Client ${clientId}] Message: ${data.type}`);
+            // Don't spam logs with high-frequency types (frames ~5/s, control).
+            if (data.type !== 'screen-frame' && data.type !== 'control') {
+                console.log(`[Client ${clientId}] Message: ${data.type}`);
+            }
             
             // Performance optimization: Update last event time
             client.lastEventTime = Date.now();
@@ -230,6 +233,15 @@ wss.on('connection', (ws, req) => {
                     } else {
                         handleControl(client, data);
                     }
+                    break;
+
+                case 'request-fallback':
+                case 'stop-fallback':
+                case 'screen-frame':
+                    // WS relay fallback for WebRTC-blocked networks (zero ICE
+                    // candidates in browser). Route by targetId, broadcast to
+                    // opposite role when target is missing/stale.
+                    forwardToPeer(client, data);
                     break;
             }
         } catch (error) {
@@ -352,6 +364,26 @@ function sendToClient(client, data) {
     if (client.ws.readyState === WebSocket.OPEN) {
         client.ws.send(JSON.stringify(data));
     }
+}
+
+// Forward a message to one peer by targetId, or to all opposite-role
+// peers when targetId is missing/stale. Adds fromId so receiver knows
+// who to answer (fallback frames, fallback requests).
+function forwardToPeer(client, data) {
+    const payload = { ...data, fromId: client.id };
+    if (data.targetId) {
+        const target = clients.get(parseInt(data.targetId));
+        if (target && target.ws.readyState === WebSocket.OPEN) {
+            sendToClient(target, payload);
+            return;
+        }
+        console.log(`[Client ${client.id}] ${data.type} target ${data.targetId} missing, broadcasting`);
+    }
+    clients.forEach((other) => {
+        if (other.id !== client.id && other.role !== client.role && other.ws.readyState === WebSocket.OPEN) {
+            sendToClient(other, payload);
+        }
+    });
 }
 
 // Handle registration
@@ -526,6 +558,19 @@ function handleIceCandidate(client, data) {
                 type: 'ice-candidate',
                 candidate: data.candidate,
                 fromId: client.id
+            });
+        } else {
+            // FIX: stale targetId (peer reconnected, id changed) — don't drop,
+            // fall back to opposite-role broadcast so ICE can still connect.
+            console.log(`[Client ${client.id}] ICE target ${data.targetId} missing, broadcasting to opposite role`);
+            clients.forEach((otherClient) => {
+                if (otherClient.id !== client.id && otherClient.role !== client.role && otherClient.ws.readyState === WebSocket.OPEN) {
+                    sendToClient(otherClient, {
+                        type: 'ice-candidate',
+                        candidate: data.candidate,
+                        fromId: client.id
+                    });
+                }
             });
         }
     } else {

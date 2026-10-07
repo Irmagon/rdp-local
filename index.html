@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remote Desktop Pro - Enhanced Version</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
 /* Reset and Variables */
@@ -276,6 +277,19 @@ body {
     width: auto;
     height: auto;
     object-fit: contain;
+}
+
+/* WS-relay fallback frame (shown when WebRTC ICE is blocked) */
+#fallbackImg {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+#fallbackImg.hidden {
+    display: none;
 }
 
 .video-container.fullscreen {
@@ -901,6 +915,7 @@ body {
                     <div class="video-container" id="videoContainer">
                         <div class="video-wrapper">
                             <video id="remoteVideo" autoplay playsinline muted></video>
+                            <img id="fallbackImg" class="hidden" alt="Remote screen (relay mode)" />
                             <canvas id="controlCanvas" tabindex="0"></canvas>
                         </div>
                         
@@ -980,10 +995,7 @@ class RemoteDesktopApp {
         
         this.config = {
             wsUrl: `ws://${window.location.hostname}:${window.location.port || '80'}`,
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ],
+            iceServers: this.buildIceServers(),
             constraints: {
                 video: {
                     width: { ideal: 1920 },
@@ -991,7 +1003,25 @@ class RemoteDesktopApp {
                     frameRate: { ideal: 30 }
                 },
                 audio: false
-            }
+            },
+            // WS video relay when WebRTC ICE yields zero candidates.
+            fallbackFps: 5,
+            fallbackWidth: 1280,
+            fallbackQuality: 0.6,
+            fallbackWatchdogMs: 8000
+        };
+
+        // WS-relay fallback (MJPEG over WebSocket) state.
+        this.fallback = {
+            // host: streaming frames out
+            streaming: false,
+            timer: null,
+            targetId: null,
+            canvas: null,
+            // client: receiving frames
+            active: false,
+            frames: 0,
+            lastFpsLog: 0
         };
         
         this.stats = {
@@ -1001,10 +1031,32 @@ class RemoteDesktopApp {
         };
         
         this.isConnecting = false;
-        
+        // True only after user explicitly clicks Connect (client) —
+        // unsolicited host-available/offer before that must not start a PC.
+        this._userInitiatedConnect = false;
+
         this.init();
     }
     
+    // Optional TURN (helps symmetric NAT, but NOT zero-candidate browsers).
+    // Set via localStorage: turnUrl, turnUser, turnCred — or ?turn=user:cred@host:port
+    buildIceServers() {
+        const servers = [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ];
+        try {
+            const q = new URLSearchParams(window.location.search).get('turn');
+            const url = localStorage.getItem('turnUrl') || (q && `turn:${q.split('@')[1]}`);
+            const user = localStorage.getItem('turnUser') || (q && q.split(':')[0]);
+            const cred = localStorage.getItem('turnCred') || (q && q.split(':')[1]?.split('@')[0]);
+            if (url && user && cred) {
+                servers.push({ urls: url, username: user, credential: cred });
+            }
+        } catch (e) { /* storage/URL unavailable — STUN only */ }
+        return servers;
+    }
+
     init() {
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
@@ -1062,9 +1114,22 @@ class RemoteDesktopApp {
         if (remoteVideo) {
             remoteVideo.addEventListener('loadedmetadata', () => this.handleVideoLoaded());
         }
+        const fallbackImg = document.getElementById('fallbackImg');
+        if (fallbackImg) {
+            fallbackImg.addEventListener('load', () => this.resizeCanvas());
+        }
         
         // Window resize event for canvas sizing
         window.addEventListener('resize', () => this.resizeCanvas());
+
+        // Tell host to stop relay when viewer tab closes.
+        window.addEventListener('beforeunload', () => {
+            try {
+                if (this.fallback?.active && this.connectedPeerId) {
+                    this.sendMessage({ type: 'stop-fallback', targetId: this.connectedPeerId });
+                }
+            } catch (e) { /* unload path — ignore */ }
+        });
         
         // Fullscreen events
         document.addEventListener('fullscreenchange', () => this.handleFullscreenChange());
@@ -1134,8 +1199,10 @@ class RemoteDesktopApp {
     
     handleWebSocketMessage(event) {
         const data = JSON.parse(event.data);
-        this.log(`Received: ${data.type}`, 'info');
-        
+        if (data.type !== 'screen-frame') {
+            this.log(`Received: ${data.type}`, 'info');
+        }
+
         switch (data.type) {
             case 'registered':
                 this.handleRegistered(data);
@@ -1158,8 +1225,20 @@ class RemoteDesktopApp {
             case 'client-joined':
                 this.handleClientJoined(data);
                 break;
+            case 'control':
+                // Executed server-side via RobotJS; browser host ignores.
+                break;
             case 'control-event':
                 this.handleControlEvent(data);
+                break;
+            case 'request-fallback':
+                this.handleFallbackRequest(data);
+                break;
+            case 'stop-fallback':
+                this.stopFallbackStream();
+                break;
+            case 'screen-frame':
+                this.handleScreenFrame(data);
                 break;
             case 'error':
                 this.handleError(data);
@@ -1242,10 +1321,123 @@ class RemoteDesktopApp {
         document.getElementById('stopShareBtn').disabled = true;
         
         this.state.streaming = false;
+        this.stopFallbackStream();
         this.closePeerConnection();
-        
+
         this.sendMessage({ type: 'host-stopped' });
         this.showNotification('Screen sharing stopped', 'info');
+    }
+
+    // ---- WS-relay fallback: MJPEG from localVideo, no WebRTC needed ----
+    handleFallbackRequest(data) {
+        if (this.state.role !== 'host' || !this.state.streaming) {
+            this.log('[FALLBACK] request ignored (not streaming host)', 'info');
+            return;
+        }
+        this.log(`[FALLBACK] viewer ${data.fromId} asked for relay, starting`, 'info');
+        this.startFallbackStream(data.fromId);
+    }
+
+    startFallbackStream(targetId) {
+        if (this.fallback.streaming) {
+            this.fallback.targetId = targetId || this.fallback.targetId;
+            return;
+        }
+        const video = document.getElementById('localVideo');
+        if (!video) return;
+        if (!this.fallback.canvas) {
+            this.fallback.canvas = document.createElement('canvas');
+        }
+        this.fallback.streaming = true;
+        this.fallback.targetId = targetId || this.connectedPeerId;
+        const intervalMs = Math.round(1000 / this.config.fallbackFps);
+        this.log(`[FALLBACK] streaming JPEG ${this.config.fallbackWidth}px @${this.config.fallbackFps}fps to ${this.fallback.targetId}`, 'info');
+        this.fallback.timer = setInterval(() => this.captureAndSendFrame(), intervalMs);
+    }
+
+    captureAndSendFrame() {
+        try {
+            const video = document.getElementById('localVideo');
+            if (!video || !video.videoWidth || video.readyState < 2) return;
+            // Backpressure: skip frame if socket buffer is full.
+            if (this.connection.ws && this.connection.ws.bufferedAmount > 2 * 1024 * 1024) return;
+            const scale = Math.min(1, this.config.fallbackWidth / video.videoWidth);
+            const w = Math.round(video.videoWidth * scale);
+            const h = Math.round(video.videoHeight * scale);
+            const c = this.fallback.canvas;
+            if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+            c.getContext('2d').drawImage(video, 0, 0, w, h);
+            this.sendMessage({
+                type: 'screen-frame',
+                frame: c.toDataURL('image/jpeg', this.config.fallbackQuality),
+                w, h,
+                targetId: this.fallback.targetId
+            });
+        } catch (e) {
+            this.log(`[FALLBACK] capture error: ${e}`, 'error');
+        }
+    }
+
+    stopFallbackStream() {
+        if (this.fallback.timer) {
+            clearInterval(this.fallback.timer);
+            this.fallback.timer = null;
+        }
+        if (this.fallback.streaming) {
+            this.log('[FALLBACK] stopped streaming', 'info');
+        }
+        this.fallback.streaming = false;
+        this.fallback.targetId = null;
+    }
+
+    // ---- client side of the fallback ----
+    maybeStartFallback() {
+        if (this.state.role !== 'client' || !this.connectedPeerId) return;
+        const st = this.connection.pc?.iceConnectionState;
+        if (st === 'connected' || st === 'completed') return; // WebRTC won
+        if (this.fallback.active) return;
+        this.log(`[FALLBACK] ICE stuck at "${st}", requesting WS relay`, 'info');
+        this.showNotification('WebRTC blocked — relay mode (WS video)', 'info');
+        this.sendMessage({ type: 'request-fallback', targetId: this.connectedPeerId });
+        this.fallback.active = true;
+        this.fallback.frames = 0;
+        this.fallback.lastFpsLog = Date.now();
+        const img = document.getElementById('fallbackImg');
+        if (img) img.classList.remove('hidden');
+        document.getElementById('videoControls')?.classList.remove('hidden');
+        const btn = document.getElementById('enableControlBtn');
+        if (btn) btn.disabled = false;
+        this.showLoading(false);
+    }
+
+    handleScreenFrame(data) {
+        if (this.state.role !== 'client') return;
+        if (!this.fallback.active) {
+            // Frame arrived without watchdog (host pushed) — accept it.
+            this.fallback.active = true;
+            document.getElementById('fallbackImg')?.classList.remove('hidden');
+            this.showLoading(false);
+        }
+        const img = document.getElementById('fallbackImg');
+        if (!img || !data.frame) return;
+        img.src = data.frame;
+        this.fallback.frames++;
+        this.isConnecting = false;
+        const now = Date.now();
+        if (now - this.fallback.lastFpsLog > 5000) {
+            const fps = (this.fallback.frames * 1000 / (now - this.fallback.lastFpsLog)).toFixed(1);
+            this.log(`[FALLBACK] relay fps=${fps} size=${data.w}x${data.h}`, 'info');
+            this.fallback.frames = 0;
+            this.fallback.lastFpsLog = now;
+        }
+    }
+
+    stopFallbackView(sendStop = true) {
+        this.fallback.active = false;
+        document.getElementById('fallbackImg')?.classList.add('hidden');
+        if (sendStop && this.connectedPeerId) {
+            this.sendMessage({ type: 'stop-fallback', targetId: this.connectedPeerId });
+        }
     }
     
     // Client connection
@@ -1255,42 +1447,101 @@ class RemoteDesktopApp {
             this.showNotification('Please enter a host ID', 'warning');
             return;
         }
-        
-        // Prevent multiple connection attempts
-        if (this.isConnecting) return;
+
+        // Allow retry: drop stale PC so the fresh offer has clean state.
+        if (this.connection.pc) {
+            this.log('[CONNECT] Closing stale PC before new attempt', 'info');
+            this.closePeerConnection();
+        }
+        // Drop previous remote frame so a dead stream never shows as 2x2 black.
+        const rv = document.getElementById('remoteVideo');
+        if (rv) rv.srcObject = null;
         this.isConnecting = true;
-        
+        this._userInitiatedConnect = true;
+
         this.log(`[CONNECT] Initiating connection to host: ${hostId}`, 'info');
         this.showLoading(true);
         this.sendMessage({ type: 'connect-to-host', hostId: hostId });
+        // Safety: don't stay stuck in "connecting" if host never answers.
+        // No error when WS relay already shows video.
+        clearTimeout(this._connectTimeout);
+        this._connectTimeout = setTimeout(() => {
+            if (this.isConnecting && !this.fallback.active) {
+                this.isConnecting = false;
+                this.showLoading(false);
+                this.log('[CONNECT] Timeout, no stream received', 'error');
+                this.showNotification('Connection timeout — check Host ID and that host shares', 'error');
+            } else if (this.fallback.active) {
+                this.isConnecting = false;
+                this.showLoading(false);
+            }
+        }, 10000);
     }
     
     // WebRTC setup
     setupPeerConnection() {
-        this.log(`[SETUP_PC] Creating peer connection for role=${this.state.role}, localStream=${!!this.connection.localStream}`, 'info');
+        // FIX: never leak old PC — close before creating new one.
+        // Old behaviour overwrote this.connection.pc, leaving stale
+        // local offers / ICE ufrag behind → black screen on viewer.
+        if (this.connection.pc) {
+            try { this.connection.pc.close(); } catch (e) {}
+            this.connection.pc = null;
+        }
+        if (this.connection.dataChannel) {
+            try { this.connection.dataChannel.close(); } catch (e) {}
+            this.connection.dataChannel = null;
+        }
+        this._pendingIce = [];
+        this._handlingOffer = false;
+
+        this.log(`[SETUP_PC] Creating peer connection for role=${this.state.role}, localStream=${!!this.connection.localStream}, peer=${this.connectedPeerId}`, 'info');
         this.connection.pc = new RTCPeerConnection({
             iceServers: this.config.iceServers
         });
-        
+
         this.connection.pc.onicecandidate = (event) => {
             if (event.candidate) {
-                this.log(`[SETUP_PC] Sending ICE candidate: ${event.candidate.candidate}`, 'info');
+                this.log(`[SETUP_PC] Sending ICE candidate to ${this.connectedPeerId}: ${event.candidate.candidate}`, 'info');
                 this.sendMessage({
                     type: 'ice-candidate',
-                    candidate: event.candidate
+                    candidate: event.candidate,
+                    targetId: this.connectedPeerId
                 });
+            } else {
+                this.log('[SETUP_PC] ICE gathering complete (null candidate)', 'info');
             }
         };
-        
+
+        this.connection.pc.onicegatheringstatechange = () => {
+            this.log(`ICE gathering state: ${this.connection.pc.iceGatheringState}`, 'info');
+        };
+
         this.connection.pc.ontrack = (event) => {
-            this.log(`[SETUP_PC] ontrack: streams=${event.streams?.length}, track=${event.track?.kind}`, 'info');
-            if (event.streams && event.streams[0]) {
-                this.handleRemoteStream(event.streams[0]);
+            this.log(`[SETUP_PC] ontrack: streams=${event.streams?.length}, track=${event.track?.kind}, muted=${event.track?.muted}`, 'info');
+            // Some browsers fire ontrack without streams — wrap track in a stream then.
+            const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+            this.handleRemoteStream(stream);
+        };
+
+        this.connection.pc.oniceconnectionstatechange = () => {
+            const st = this.connection.pc.iceConnectionState;
+            this.log(`ICE state: ${st}`, 'info');
+            if (st === 'failed') {
+                this.log('ICE failed — requesting WS relay fallback', 'error');
+                this.maybeStartFallback();
+            }
+            if (st === 'connected' || st === 'completed') {
+                this.log('ICE connected — media should flow', 'info');
+                clearTimeout(this._fallbackTimer);
+                if (this.state.role === 'client' && this.fallback.active) {
+                    this.log('[FALLBACK] WebRTC live, stopping relay', 'info');
+                    this.stopFallbackView(true);
+                }
             }
         };
-        
-        this.connection.pc.oniceconnectionstatechange = () => {
-            this.log(`ICE state: ${this.connection.pc.iceConnectionState}`, 'info');
+
+        this.connection.pc.onconnectionstatechange = () => {
+            this.log(`PC state: ${this.connection.pc.connectionState}`, 'info');
         };
         
         // Setup data channel for control
@@ -1310,7 +1561,15 @@ class RemoteDesktopApp {
             this.connection.localStream.getTracks().forEach(track => {
                 this.connection.pc.addTrack(track, this.connection.localStream);
             });
-            this.createOffer();
+            // FIX: only offer when we actually know the peer.
+            // Previously startScreenShare() created a stale local offer with
+            // targetId=null; the later real offer reused the same PC in
+            // have-local-offer state → broken SDP → viewer black screen.
+            if (this.connectedPeerId) {
+                this.createOffer();
+            } else {
+                this.log('[SETUP_PC] No peer yet, waiting for client-joined before offer', 'info');
+            }
         }
     }
     
@@ -1331,58 +1590,138 @@ class RemoteDesktopApp {
     
     async createOffer() {
         try {
+            if (!this.connection.pc) {
+                this.log('[CREATE_OFFER] No peer connection, abort', 'error');
+                return;
+            }
+            // Don't stack offers: if we already wait for an answer, skip.
+            if (this.connection.pc.signalingState !== 'stable') {
+                this.log(`[CREATE_OFFER] Skipped, signalingState=${this.connection.pc.signalingState}`, 'info');
+                return;
+            }
             this.log(`[CREATE_OFFER] Creating offer for peer ${this.connectedPeerId}`, 'info');
             const offer = await this.connection.pc.createOffer();
             await this.connection.pc.setLocalDescription(offer);
-            
+            this.log(`[CREATE_OFFER] local SDP has video=${this.connection.pc.localDescription.sdp.includes('m=video')}, gathering=${this.connection.pc.iceGatheringState}`, 'info');
+
             this.log(`[CREATE_OFFER] Sending offer to ${this.connectedPeerId}`, 'info');
-            this.sendMessage({ 
-                type: 'offer', 
-                offer: offer,
-                targetId: this.connectedPeerId 
+            this.sendMessage({
+                type: 'offer',
+                offer: this.connection.pc.localDescription,
+                targetId: this.connectedPeerId
             });
         } catch (error) {
             this.log(`Create offer error: ${error}`, 'error');
         }
     }
-    
+
+    _flushPendingIce() {
+        if (!this._pendingIce || this._pendingIce.length === 0) return;
+        if (!this.connection.pc || !this.connection.pc.remoteDescription) return;
+        const queued = this._pendingIce.splice(0);
+        queued.forEach(async (c) => {
+            try {
+                await this.connection.pc.addIceCandidate(new RTCIceCandidate(c));
+            } catch (e) {
+                this.log(`Flush ICE error: ${e}`, 'error');
+            }
+        });
+        this.log(`Flushed ${queued.length} queued ICE candidates`, 'info');
+    }
+
     async handleOffer(data) {
+        // Guard against parallel duplicate offers (register + manual connect
+        // each trigger host-available → two offers back-to-back).
+        if (this._handlingOffer) {
+            this.log('[CLIENT] handleOffer skipped, already handling one', 'info');
+            return;
+        }
+        // Unsolicited offer before user clicked Connect (server notifies host
+        // on register) — ignore it; the real handshake starts at Connect.
+        // Host rebuilds its PC on the explicit client-joined, so nothing is lost.
+        if (this.state.role === 'client' && !this._userInitiatedConnect && !this.connection.pc) {
+            this.log(`[CLIENT] Unsolicited offer from ${data.fromId} ignored (click Connect first)`, 'info');
+            return;
+        }
+        this._handlingOffer = true;
         try {
-            this.log(`[CLIENT] handleOffer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, pcState=${this.connection.pc?.connectionState}`, 'info');
+            this.log(`[CLIENT] handleOffer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, pcState=${this.connection.pc?.connectionState}, signaling=${this.connection.pc?.signalingState}`, 'info');
             this.connectedPeerId = data.fromId;
-            
+
+            // Client may get offer before ever creating PC (host was faster).
+            if (!this.connection.pc) {
+                this.setupPeerConnection();
+            }
+            // Glare: if we are not stable, roll back to accept the new offer.
+            if (this.connection.pc.signalingState !== 'stable') {
+                this.log(`[CLIENT] signaling=${this.connection.pc.signalingState}, rollback`, 'info');
+                try {
+                    await this.connection.pc.setLocalDescription({ type: 'rollback' });
+                } catch (e) {
+                    this.log(`Rollback failed: ${e}, recreating PC`, 'error');
+                    this.setupPeerConnection();
+                }
+            }
+
             await this.connection.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
             this.log(`[CLIENT] Set remote description (offer)`, 'info');
-            
+            this.log(`[CLIENT] remote SDP has video=${this.connection.pc.remoteDescription.sdp.includes('m=video')}, receivers=${this.connection.pc.getReceivers().map(r => r.track?.kind + '/' + r.track?.readyState).join(',')}`, 'info');
+            this._flushPendingIce();
+
             const answer = await this.connection.pc.createAnswer();
             await this.connection.pc.setLocalDescription(answer);
             this.log(`[CLIENT] Created and set local description (answer)`, 'info');
-            
+
             this.log(`[CLIENT] Sending answer to ${data.fromId}`, 'info');
-            this.sendMessage({ 
-                type: 'answer', 
-                answer: answer,
-                targetId: data.fromId 
+            this.sendMessage({
+                type: 'answer',
+                answer: this.connection.pc.localDescription,
+                targetId: data.fromId
             });
-            
+
+            // Watchdog: if ICE never connects (blocked WebRTC), fall back to WS relay.
+            clearTimeout(this._fallbackTimer);
+            this._fallbackTimer = setTimeout(() => this.maybeStartFallback(), this.config.fallbackWatchdogMs);
+
             this.showLoading(false);
         } catch (error) {
             this.log(`Handle offer error: ${error}`, 'error');
+        } finally {
+            this._handlingOffer = false;
         }
     }
-    
+
     async handleAnswer(data) {
         try {
-            this.log(`[HOST] handleAnswer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}`, 'info');
+            this.log(`[HOST] handleAnswer: fromId=${data.fromId}, pcExists=${!!this.connection.pc}, signaling=${this.connection.pc?.signalingState}`, 'info');
+            if (!this.connection.pc) return;
+            // Ignore late/duplicate answers.
+            if (this.connection.pc.signalingState !== 'have-local-offer') {
+                this.log(`[HOST] Ignored answer, signaling=${this.connection.pc.signalingState}`, 'info');
+                return;
+            }
             await this.connection.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
             this.log(`[HOST] Set remote description (answer)`, 'info');
+            this._flushPendingIce();
         } catch (error) {
             this.log(`Handle answer error: ${error}`, 'error');
         }
     }
-    
+
     async handleIceCandidate(data) {
         try {
+            if (!this.connection.pc) {
+                this.log('[ICE] No PC yet, dropping candidate', 'info');
+                return;
+            }
+            // Candidates arriving before remote description must be queued,
+            // otherwise addIceCandidate throws and media never connects.
+            if (!this.connection.pc.remoteDescription) {
+                this._pendingIce = this._pendingIce || [];
+                this._pendingIce.push(data.candidate);
+                this.log(`[ICE] Queued candidate (no remote yet), queue=${this._pendingIce.length}`, 'info');
+                return;
+            }
             this.log(`[ICE] Received candidate from ${data.fromId}: ${data.candidate?.candidate?.substring(0, 50)}...`, 'info');
             await this.connection.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
             this.log(`[ICE] Added candidate`, 'info');
@@ -1390,24 +1729,116 @@ class RemoteDesktopApp {
             this.log(`Handle ICE candidate error: ${error}`, 'error');
         }
     }
-    
+
     handleRemoteStream(stream) {
         this.log(`[REMOTE_STREAM] Received stream: id=${stream.id}, tracks=${stream.getTracks().length}`, 'info');
         stream.getTracks().forEach((t, i) => {
-            this.log(`[REMOTE_STREAM] Track ${i}: kind=${t.kind}, enabled=${t.enabled}, readyState=${t.readyState}`, 'info');
+            this.log(`[REMOTE_STREAM] Track ${i}: kind=${t.kind}, enabled=${t.enabled}, readyState=${t.readyState}, muted=${t.muted}`, 'info');
+            // Unmute callback helps diagnose frozen frames.
+            t.onunmute = () => {
+                this.log(`[REMOTE_STREAM] Track ${t.kind} unmuted — frames flowing`, 'info');
+                this.showLoading(false);
+                // Real WebRTC video is live — relay no longer needed.
+                if (this.state.role === 'client' && this.fallback.active) {
+                    this.stopFallbackView(true);
+                }
+            };
+            t.onmute = () => this.log(`[REMOTE_STREAM] Track ${t.kind} muted`, 'info');
         });
         this.connection.remoteStream = stream;
         const remoteVideo = document.getElementById('remoteVideo');
-        remoteVideo.srcObject = stream;
-        remoteVideo.play().catch(err => {
-            this.log(`Error playing video: ${err}`, 'error');
-        });
+        // FIX for AbortError + black screen: don't reassign same stream,
+        // ensure muted/playsInline for autoplay, play only when ready.
+        if (remoteVideo.srcObject === stream && !remoteVideo.paused) {
+            this.log('[REMOTE_STREAM] Same stream already playing, skip', 'info');
+            return;
+        }
+        remoteVideo.muted = true;
+        remoteVideo.playsInline = true;
+        if (remoteVideo.srcObject !== stream) {
+            remoteVideo.srcObject = stream;
+        }
+        const tryPlay = () => {
+            if (remoteVideo.paused) {
+                remoteVideo.play().catch(err => {
+                    if (err && err.name === 'AbortError') {
+                        // New load interrupted us — retry once video can play.
+                        this.log('play() aborted, will retry on canplay', 'info');
+                    } else {
+                        this.log(`Error playing video: ${err}`, 'error');
+                    }
+                });
+            }
+        };
+        if (remoteVideo.readyState >= 2) {
+            tryPlay();
+        } else {
+            remoteVideo.oncanplay = tryPlay;
+        }
         document.getElementById('videoControls').classList.remove('hidden');
         document.getElementById('enableControlBtn').disabled = false;
         this.showLoading(false);
         this.showNotification('Connected to remote screen', 'success');
         this.isConnecting = false;
+        clearTimeout(this._connectTimeout);
         this.startStatsMonitoring();
+    }
+
+    // Bare-PC ICE self-test, call from console: app.testIceGathering()
+    // Isolates the browser from app logic: if this also yields 0 candidates,
+    // WebRTC is blocked in the browser/OS (extension, policy, VPN, firewall).
+    async testIceGathering() {
+        this.log('[SELFTEST] starting bare PC gathering test...', 'info');
+        const pc = new RTCPeerConnection({ iceServers: this.config.iceServers });
+        let count = 0;
+        pc.onicecandidate = (e) => {
+            if (e.candidate) {
+                count++;
+                this.log(`[SELFTEST] candidate ${count}: ${e.candidate.candidate}`, 'info');
+            } else {
+                this.log(`[SELFTEST] complete, total=${count}, gathering=${pc.iceGatheringState}`, 'info');
+            }
+        };
+        pc.createDataChannel('selftest');
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        setTimeout(() => {
+            this.log(`[SELFTEST] after 6s total=${count} (expect >=1 host candidate on LAN)`, count > 0 ? 'info' : 'error');
+            pc.close();
+        }, 6000);
+    }
+
+    diagnoseBlackScreen() {
+        const pc = this.connection.pc;
+        const v = document.getElementById('remoteVideo');
+        this.log(`DIAG role=${this.state.role} peer=${this.connectedPeerId} signaling=${pc?.signalingState} ice=${pc?.iceConnectionState} gather=${pc?.iceGatheringState} conn=${pc?.connectionState}`, 'info');
+        this.log(`DIAG video paused=${v?.paused} readyState=${v?.readyState} w=${v?.videoWidth}x${v?.videoHeight} src=${!!v?.srcObject}`, 'info');
+        this.log(`DIAG localSDP=${!!pc?.localDescription} remoteSDP=${!!pc?.remoteDescription} pendingIce=${this._pendingIce?.length || 0}`, 'info');
+        this.log(`DIAG transceivers=${pc?.getTransceivers().map(t => t.direction + ':' + (t.sender.track?.kind || '-') + '/' + (t.receiver.track?.kind || '-')).join(' | ')}`, 'info');
+        // SDP connection lines: c= should be IN IP4 <ip>, m=video port must be != 0.
+        const sdp = pc?.localDescription?.sdp || '';
+        sdp.split('\n').filter(l => l.startsWith('m=') || l.startsWith('c=') || l.startsWith('a=candidate')).forEach(l => this.log('DIAG localSDP ' + l.trim(), 'info'));
+        if (!pc) return;
+        pc.getStats().then(stats => {
+            let localCands = 0;
+            stats.forEach(r => {
+                if (r.type === 'local-candidate') {
+                    localCands++;
+                    this.log(`DIAG local-cand ${r.protocol}/${r.candidateType} ${r.address}:${r.port}`, 'info');
+                }
+            });
+            this.log(`DIAG local-candidates total=${localCands} (0 = browser gave no interfaces to WebRTC!)`, 'info');
+        });
+        pc?.getStats().then(stats => {
+            stats.forEach(r => {
+                if (r.type === 'inbound-rtp' && r.mediaType === 'video') {
+                    this.log(`DIAG inbound framesReceived=${r.framesReceived} dropped=${r.framesDropped} bytes=${r.bytesReceived} ts=${r.timestamp}`, 'info');
+                }
+                if (r.type === 'candidate-pair' && r.state === 'succeeded') {
+                    this.log(`DIAG pair rtt=${r.currentRoundTripTime} availBw=${r.availableOutgoingBitrate}`, 'info');
+                }
+            });
+        });
     }
     
     handleVideoLoaded() {
@@ -1668,6 +2099,7 @@ class RemoteDesktopApp {
     
     // Stats monitoring
     startStatsMonitoring() {
+        if (this.stats.interval) return;
         this.stats.interval = setInterval(() => this.updateStats(), 1000);
     }
     
@@ -1722,56 +2154,74 @@ class RemoteDesktopApp {
     // Utilities
     resizeCanvas() {
         const video = document.getElementById('remoteVideo');
+        const img = document.getElementById('fallbackImg');
         const canvas = document.getElementById('controlCanvas');
-        
-        if (video && canvas) {
-            const rect = video.getBoundingClientRect();
-            
+
+        // Reference: live WebRTC video, else visible relay image.
+        let ref = null;
+        if (video && video.srcObject && video.videoWidth) {
+            ref = video;
+        } else if (img && !img.classList.contains('hidden') && img.naturalWidth) {
+            ref = img;
+        }
+        // No remote picture yet (host side, or pre-stream) — nothing to fit.
+        if (!ref || !canvas) return;
+
+        {
+            const rect = ref.getBoundingClientRect();
+            const vw = ref.videoWidth || ref.naturalWidth || 0;
+            const vh = ref.videoHeight || ref.naturalHeight || 0;
+
             // Store the actual video dimensions and container dimensions
             this.videoDisplayInfo = {
                 containerWidth: rect.width,
                 containerHeight: rect.height,
-                videoWidth: video.videoWidth,
-                videoHeight: video.videoHeight,
+                videoWidth: vw,
+                videoHeight: vh,
                 offsetX: 0,
                 offsetY: 0,
                 scaleX: 1,
                 scaleY: 1
             };
-            
+
             // Calculate letterboxing/pillarboxing
-            if (video.videoWidth && video.videoHeight) {
+            if (vw && vh && rect.width && rect.height) {
                 const containerRatio = rect.width / rect.height;
-                const videoRatio = video.videoWidth / video.videoHeight;
-                
+                const videoRatio = vw / vh;
+
                 if (containerRatio > videoRatio) {
                     // Letterboxing (black bars on left/right)
                     const videoDisplayWidth = rect.height * videoRatio;
                     const offsetX = (rect.width - videoDisplayWidth) / 2;
-                    
+
                     this.videoDisplayInfo.offsetX = offsetX;
                     this.videoDisplayInfo.scaleX = videoDisplayWidth / rect.width;
                 } else {
                     // Pillarboxing (black bars on top/bottom)
                     const videoDisplayHeight = rect.width / videoRatio;
                     const offsetY = (rect.height - videoDisplayHeight) / 2;
-                    
+
                     this.videoDisplayInfo.offsetY = offsetY;
                     this.videoDisplayInfo.scaleY = videoDisplayHeight / rect.height;
                 }
             }
-            
-            // Set canvas to match the container
-            canvas.width = rect.width;
-            canvas.height = rect.height;
-            canvas.style.width = `${rect.width}px`;
-            canvas.style.height = `${rect.height}px`;
-            canvas.style.left = `${rect.left}px`;
-            canvas.style.top = `${rect.top}px`;
-            
-            this.log(`Canvas resized to ${rect.width}x${rect.height}, video: ${video.videoWidth}x${video.videoHeight}`, 'info');
-            if (this.videoDisplayInfo.offsetX > 0 || this.videoDisplayInfo.offsetY > 0) {
-                this.log(`Letterboxing detected: offsetX=${this.videoDisplayInfo.offsetX}, offsetY=${this.videoDisplayInfo.offsetY}`, 'info');
+
+            // Set canvas to match the container (skip if unchanged — frames
+            // arrive ~5/s and must not thrash layout/log on every one).
+            const last = this._lastCanvasSize;
+            if (!last || Math.abs(last.w - rect.width) > 1 || Math.abs(last.h - rect.height) > 1) {
+                canvas.width = rect.width;
+                canvas.height = rect.height;
+                canvas.style.width = `${rect.width}px`;
+                canvas.style.height = `${rect.height}px`;
+                canvas.style.left = `${rect.left}px`;
+                canvas.style.top = `${rect.top}px`;
+                this._lastCanvasSize = { w: rect.width, h: rect.height };
+
+                this.log(`Canvas resized to ${rect.width}x${rect.height}, video: ${vw}x${vh}`, 'info');
+                if (this.videoDisplayInfo.offsetX > 0 || this.videoDisplayInfo.offsetY > 0) {
+                    this.log(`Letterboxing detected: offsetX=${this.videoDisplayInfo.offsetX}, offsetY=${this.videoDisplayInfo.offsetY}`, 'info');
+                }
             }
         }
     }
@@ -1867,51 +2317,81 @@ class RemoteDesktopApp {
     }
     
     closePeerConnection() {
+        clearTimeout(this._fallbackTimer);
+        // Tell host to stop relay (no-op if WebRTC-only session).
+        if (this.fallback.active && this.state.role === 'client') {
+            this.stopFallbackView(true);
+        }
         if (this.connection.pc) {
-            this.connection.pc.close();
+            try { this.connection.pc.close(); } catch (e) {}
             this.connection.pc = null;
         }
-        
+
         if (this.connection.dataChannel) {
-            this.connection.dataChannel.close();
+            try { this.connection.dataChannel.close(); } catch (e) {}
             this.connection.dataChannel = null;
         }
-        
+
+        this._pendingIce = [];
+        this._handlingOffer = false;
+
         if (this.stats.interval) {
             clearInterval(this.stats.interval);
             this.stats.interval = null;
         }
     }
-    
+
     handleError(data) {
         this.log(`Error: ${data.message}`, 'error');
         this.showNotification(data.message, 'error');
         this.showLoading(false);
+        this.isConnecting = false;
+        clearTimeout(this._connectTimeout);
     }
     
     // Handle host ready
     handleHostReady(data) {
         this.log('Host is ready to share', 'info');
-        if (this.state.role === 'client') {
-            this.setupPeerConnection();
+        // Don't auto-create PC — wait for explicit Connect click.
+        if (this.state.role === 'client' && !this._userInitiatedConnect) {
+            this.showNotification('Host is available — click Connect', 'info');
         }
     }
-    
+
     // Handle host available (when client connects to a host)
     handleHostAvailable(data) {
         this.log(`[CLIENT] handleHostAvailable: hostId=${data.hostId}, role=${this.state.role}, streaming=${this.state.streaming}`, 'info');
+        if (this.state.role !== 'client') return;
+        // Auto host-available on register (before user clicks Connect) —
+        // only remember the id, don't start WebRTC yet (avoids double handshake).
+        if (!this._userInitiatedConnect) {
+            this.availableHostId = data.hostId;
+            const input = document.getElementById('hostIdInput');
+            if (input && !input.value) input.value = data.hostId;
+            this.showNotification(`Host ${data.hostId} available — click Connect`, 'info');
+            return;
+        }
+        // Ignore duplicate host-available for the same peer with live PC.
+        if (this.connectedPeerId === data.hostId && this.connection.pc) {
+            this.log('[CLIENT] Duplicate host-available ignored', 'info');
+            return;
+        }
         this.connectedPeerId = data.hostId;
         this.setupPeerConnection();
     }
-    
+
     // Handle client joined (when a client connects to the host)
     handleClientJoined(data) {
         this.log(`[HOST] handleClientJoined: clientId=${data.clientId}, role=${this.state.role}, streaming=${this.state.streaming}, pcExists=${!!this.connection.pc}`, 'info');
+        if (this.state.role !== 'host') return;
         this.connectedPeerId = data.clientId;
-        
+
         if (this.state.role === 'host' && this.state.streaming) {
-            this.log(`[HOST] Creating offer for client ${data.clientId}`, 'info');
-            this.createOffer();
+            // FIX: rebuild PC so the offer always matches current tracks/ufrag.
+            // Reusing a PC that already did setLocal(offer) with no peer
+            // is the main black-screen cause.
+            this.log(`[HOST] (Re)creating PC + offer for client ${data.clientId}`, 'info');
+            this.setupPeerConnection();
         }
     }
     
