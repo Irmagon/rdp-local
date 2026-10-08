@@ -285,6 +285,15 @@ body {
     display: block;
 }
 
+/* Both picture sources share the exact same box (stacked, not one below
+   the other): without this the empty video element takes 100% height and
+   pushes the relay frame below the fold, which also makes zoom look dead. */
+#zoomLayer > #remoteVideo,
+#zoomLayer > #fallbackImg {
+    position: absolute;
+    inset: 0;
+}
+
 /* Zoom layer: remote picture fills the whole canvas area (contain —
    full-bleed without distortion) and is the wheel-zoom/pan surface. */
 #zoomLayer {
