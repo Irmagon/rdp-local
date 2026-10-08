@@ -347,6 +347,23 @@ body.no-control #controlInstructions {
     cursor: copy;
 }
 
+/* Kiosk mode (autoshare host): header keeps ONLY the join link and a big
+   stop button — every other header button is hidden. */
+body.kiosk .header-controls > :not(#headerShareWrap) {
+    display: none;
+}
+body.kiosk #headerStopShareBtn {
+    width: 52px;
+    height: 52px;
+    font-size: 1.5rem;
+    border-radius: 12px;
+}
+body.kiosk #headerJoinLink {
+    width: 300px;
+    font-size: 0.95rem;
+    padding: 0.5rem 0.7rem;
+}
+
 #fallbackImg.hidden {
     display: none;
 }
@@ -1271,6 +1288,7 @@ class RemoteDesktopApp {
         document.getElementById('clientPanel').style.display = 'none';
         document.getElementById('leftSidebar').style.display = '';
         document.getElementById('headerShareWrap')?.classList.add('hidden');
+        document.body.classList.remove('kiosk');
         this.updateStatus('Connected', true);
     }
     
@@ -1392,6 +1410,7 @@ class RemoteDesktopApp {
         // any share — an already-chosen Host starts capture at once.
         if (this.state.role === 'host' && this.serverAutoshare) {
             document.getElementById('leftSidebar').style.display = 'none';
+            document.body.classList.add('kiosk');
             this.startScreenShare();
         }
         // Server-global control kill-switch (allow_control=0 in config.ini).
