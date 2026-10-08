@@ -271,20 +271,62 @@ body {
 }
 
 #remoteVideo {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
+    display: block;
 }
 
 /* WS-relay fallback frame (shown when WebRTC ICE is blocked) */
 #fallbackImg {
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
+    display: block;
+}
+
+/* Zoom layer: remote picture fills the whole canvas area (contain —
+   full-bleed without distortion) and is the wheel-zoom/pan surface. */
+#zoomLayer {
+    position: absolute;
+    inset: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+}
+
+/* Zoom badge: shows current scale in view mode, click resets to 1x. */
+#zoomBadge {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.65);
+    border: 1px solid var(--primary);
+    border-radius: 8px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    user-select: none;
+}
+#zoomBadge.hidden { display: none; }
+
+/* Global view-only mode (server allow_control=0): control UI is gone. */
+body.no-control #enableControlBtn,
+body.no-control #headerToggleControlBtn,
+body.no-control #controlInstructions {
+    display: none !important;
+}
+
+/* Host capture source: must keep playing for WS-relay frame grabs, but
+   the host needs no preview — a 2px invisible element costs ~nothing. */
+#localVideo.capture-source {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 2px;
+    height: 2px;
+    opacity: 0;
+    pointer-events: none;
 }
 
 #fallbackImg.hidden {
@@ -325,34 +367,6 @@ body {
     line-height: 1;
 }
 .ic.rec { color: #ff5b5b; }
-
-/* Local Video PiP */
-.local-video-pip {
-    position: absolute;
-    bottom: 1rem;
-    right: 1rem;
-    width: 240px;
-    height: 135px;
-    background: #000;
-    border: 2px solid var(--primary);
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: var(--shadow);
-    transition: var(--transition);
-    z-index: 20;
-}
-
-.local-video-pip.hidden {
-    transform: scale(0.8);
-    opacity: 0;
-    pointer-events: none;
-}
-
-#localVideo {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-}
 
 /* Video Controls */
 .video-controls {
@@ -674,11 +688,6 @@ body {
         bottom: 1rem;
         padding: 0.75rem;
     }
-    
-    .local-video-pip {
-        width: 120px;
-        height: 68px;
-    }
 }
 
 /* Scrollbar */
@@ -782,7 +791,7 @@ body {
                 <button class="header-control-btn" id="headerRecordBtn" title="Record">
                     <span class="ic rec">●</span>
                 </button>
-                <button class="header-control-btn" id="headerToggleControlBtn" title="Toggle Control">
+                <button class="header-control-btn" id="headerToggleControlBtn" title="Режим просмотра/управления">
                     <span class="ic">🖱</span>
                 </button>
                 <button class="header-control-btn" id="headerToggleSidebarBtn" title="Toggle Sidebar">
@@ -828,10 +837,6 @@ body {
                                 </div>
                                 <div class="form-group">
                                     <div class="checkbox-group">
-                                        <input type="checkbox" id="captureAudio">
-                                        <label for="captureAudio">Include Audio</label>
-                                    </div>
-                                    <div class="checkbox-group">
                                         <input type="checkbox" id="showCursor" checked>
                                         <label for="showCursor">Show Mouse Cursor</label>
                                     </div>
@@ -873,11 +878,11 @@ body {
                                     <span class="ic">🔗</span> Connect
                                 </button>
                                 <button class="btn btn-secondary btn-block" id="enableControlBtn" disabled>
-                                    <span class="ic">🎮</span> Enable Control
+                                    <span class="ic">🎮</span> Управление
                                 </button>
                                 
-                                <!-- New keyboard and mouse control instructions -->
-                                <div class="form-group" style="margin-top:15px; border-top:1px solid #555; padding-top:15px;">
+                                <!-- Remote control instructions (hidden on view-only servers) -->
+                                <div class="form-group" id="controlInstructions" style="margin-top:15px; border-top:1px solid #555; padding-top:15px;">
                                     <label class="form-label">Control Instructions:</label>
                                     <ul style="padding-left: 20px; font-size: 0.85rem; color: #b0b0b0;">
                                         <li>Click <strong>Enable Control</strong> to control remote machine</li>
@@ -925,15 +930,17 @@ body {
                 <div class="video-area">
                     <div class="video-container" id="videoContainer">
                         <div class="video-wrapper">
-                            <video id="remoteVideo" autoplay playsinline muted></video>
-                            <img id="fallbackImg" class="hidden" alt="Remote screen (relay mode)" />
+                            <div id="zoomLayer">
+                                <video id="remoteVideo" autoplay playsinline muted></video>
+                                <img id="fallbackImg" class="hidden" alt="Remote screen (relay mode)" />
+                            </div>
                             <canvas id="controlCanvas" tabindex="0"></canvas>
                         </div>
-                        
-                        <!-- Local Video PiP -->
-                        <div class="local-video-pip hidden" id="localVideoPip">
-                            <video id="localVideo" autoplay playsinline muted></video>
-                        </div>
+                        <div id="zoomBadge" class="hidden" title="Reset zoom">⌕ 100%</div>
+
+                        <!-- Host capture source (invisible): keeps playing so the
+                             WS relay can grab frames; the host gets no preview. -->
+                        <video id="localVideo" class="capture-source" autoplay playsinline muted></video>
 
                         <!-- Loading Overlay -->
                         <div class="loading-overlay" id="loadingOverlay">
@@ -1036,6 +1043,15 @@ class RemoteDesktopApp {
         // Remote control allowed only when the target host runs this server
         // (server tells us via hostLocal / control-unavailable).
         this.controlAllowed = true;
+        // Global kill-switch from the server (registered.allowControl).
+        // false = view-only server: all control UI is hidden, packets gated.
+        this.serverControlEnabled = true;
+
+        // Viewer zoom (view mode only): scale 1x-3x + pan offset in px.
+        // Applied as CSS transform on #zoomLayer; control mode resets to 1x.
+        this.zoom = { s: 1, tx: 0, ty: 0 };
+        this.zoomMax = 3;
+        this._panning = null;
 
         this.init();
     }
@@ -1091,13 +1107,16 @@ class RemoteDesktopApp {
         document.getElementById('toggleControlBtn')?.addEventListener('click', () => this.toggleControl());
         document.getElementById('toggleSidebarBtn')?.addEventListener('click', () => this.toggleSidebar());
         
-        // Canvas events for remote control
+        // Canvas events: control mode sends remote input, view mode
+        // zooms (wheel) and pans (drag). Handlers branch on state.
         const canvas = document.getElementById('controlCanvas');
         if (canvas) {
             canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
             canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
             canvas.addEventListener('mouseup', (e) => this.handleMouseUp(e));
+            canvas.addEventListener('mouseleave', () => this.endPan());
             canvas.addEventListener('wheel', (e) => this.handleWheel(e), { passive: false });
+            canvas.addEventListener('dblclick', () => this.resetZoom());
             canvas.addEventListener('contextmenu', (e) => e.preventDefault());
             canvas.addEventListener('touchstart', (e) => this.handleTouchStart(e), { passive: false });
             canvas.addEventListener('touchmove', (e) => this.handleTouchMove(e), { passive: false });
@@ -1127,6 +1146,9 @@ class RemoteDesktopApp {
         
         // Window resize event for canvas sizing
         window.addEventListener('resize', () => this.resizeCanvas());
+
+        // Zoom badge: click resets to 1x.
+        document.getElementById('zoomBadge')?.addEventListener('click', () => this.resetZoom());
 
         // Tell host to stop relay when viewer tab closes.
         window.addEventListener('beforeunload', () => {
@@ -1280,6 +1302,12 @@ class RemoteDesktopApp {
             document.getElementById('sessionId').value = data.ip || data.clientId;
             document.getElementById('hostNumericId').textContent = `ID: ${data.clientId}`;
         }
+        // Server-global control kill-switch (allow_control=0 in config.ini).
+        this.serverControlEnabled = data.allowControl !== false;
+        if (!this.serverControlEnabled) {
+            this.log('Server runs view-only (allow_control=0) — control UI hidden', 'info');
+        }
+        this.applyControlAvailability();
         this.log(`Registered with ID: ${data.clientId}, IP: ${data.ip || 'n/a'}`, 'info');
     }
 
@@ -1289,12 +1317,21 @@ class RemoteDesktopApp {
     // control-unavailable message is the backstop.
     setControlAllowed(allowed, reason) {
         this.controlAllowed = allowed;
-        if (!allowed && this.state.controlling) this.toggleControl();
-        if (!allowed) {
-            const btn = document.getElementById('enableControlBtn');
-            if (btn) btn.disabled = true;
-            if (reason) this.showNotification(reason, 'warning');
-        }
+        this.applyControlAvailability(reason);
+    }
+
+    // Effective control = per-host steerability AND the server-global
+    // kill-switch (allow_control=0). Central place for the mode button,
+    // view-only UI hiding and canvas interactivity.
+    applyControlAvailability(reason) {
+        const effective = this.controlAllowed && this.serverControlEnabled;
+        document.body.classList.toggle('no-control', !this.serverControlEnabled);
+        if (!effective && this.state.controlling) this.toggleControl();
+        const btn = document.getElementById('enableControlBtn');
+        if (btn) btn.disabled = !effective;
+        if (!effective && reason) this.showNotification(reason, 'warning');
+        this.updateCanvasInteractivity();
+        return effective;
     }
 
     handleControlUnavailable(data) {
@@ -1355,18 +1392,23 @@ class RemoteDesktopApp {
                 return;
             }
 
+            // Audio is never captured: screen sharing is video-only by design
+            // (no microphone/system-audio encode load on the host).
             const constraints = {
                 video: {
                     ...this.config.constraints.video,
                     cursor: document.getElementById('showCursor')?.checked ? 'always' : 'never'
                 },
-                audio: document.getElementById('captureAudio')?.checked
+                audio: false
             };
             
             this.connection.localStream = await navigator.mediaDevices.getDisplayMedia(constraints);
             
+            // No host preview (a live 1080p preview cost a full decode+render
+            // pass and lagged local input): #localVideo stays a 2px invisible
+            // element whose frames feed only the WS relay via drawImage.
             document.getElementById('localVideo').srcObject = this.connection.localStream;
-            document.getElementById('localVideoPip').classList.remove('hidden');
+            this.updateStatus('Sharing screen…', true);
             
             this.connection.localStream.getVideoTracks()[0].onended = () => {
                 this.stopScreenShare();
@@ -1395,7 +1437,7 @@ class RemoteDesktopApp {
         }
         
         document.getElementById('localVideo').srcObject = null;
-        document.getElementById('localVideoPip').classList.add('hidden');
+        this.updateStatus('Connected', true);
         
         document.getElementById('startShareBtn').disabled = false;
         document.getElementById('stopShareBtn').disabled = true;
@@ -1486,7 +1528,7 @@ class RemoteDesktopApp {
         if (img) img.classList.remove('hidden');
         document.getElementById('videoControls')?.classList.remove('hidden');
         const btn = document.getElementById('enableControlBtn');
-        if (btn) btn.disabled = !this.controlAllowed;
+        if (btn) this.applyControlAvailability();
         this.showLoading(false);
     }
 
@@ -1662,7 +1704,7 @@ class RemoteDesktopApp {
         
         this.connection.dataChannel.onopen = () => {
             this.log('Data channel opened', 'info');
-            document.getElementById('enableControlBtn').disabled = false;
+            this.applyControlAvailability();
         };
         
         this.connection.dataChannel.onmessage = (event) => {
@@ -1861,7 +1903,9 @@ class RemoteDesktopApp {
         }
         document.getElementById('videoControls')?.classList.remove('hidden');
         const ctrlBtn = document.getElementById('enableControlBtn');
-        if (ctrlBtn) ctrlBtn.disabled = !this.controlAllowed;
+        if (ctrlBtn) this.applyControlAvailability();
+        // Connected viewing: canvas becomes the zoom/pan surface.
+        this.updateCanvasInteractivity();
         this.showLoading(false);
         this.showNotification('Connected to remote screen', 'success');
         this.isConnecting = false;
@@ -1931,8 +1975,14 @@ class RemoteDesktopApp {
         this.log('Remote video loaded', 'info');
     }
     
-    // Remote control
+    // Viewer modes: CONTROL sends remote input (zoom locked at 1x),
+    // VIEW is zoom/pan only (wheel zooms, drag pans, nothing is sent).
+    // The mode button toggles between them.
     toggleControl() {
+        if (!this.state.controlling && !this.serverControlEnabled) {
+            this.showNotification('Remote control disabled by server (view-only mode)', 'warning');
+            return;
+        }
         if (!this.state.controlling && !this.controlAllowed) {
             this.showNotification('Remote control unavailable: host runs no server', 'warning');
             return;
@@ -1943,45 +1993,41 @@ class RemoteDesktopApp {
         const headerBtn = document.getElementById('headerToggleControlBtn');
         const videoContainer = document.getElementById('videoContainer');
         const controlCanvas = document.getElementById('controlCanvas');
-        
+
         if (this.state.controlling) {
-            if (btn) btn.textContent = 'Disable Control';
+            // Zoom is view-only: reset before taking control.
+            this.resetZoom();
+            if (btn) btn.innerHTML = '<span class="ic">👁</span> Просмотр';
             if (btn) btn.classList.add('active');
             if (toggleBtn) toggleBtn.classList.add('active');
             if (headerBtn) headerBtn.classList.add('active');
             if (videoContainer) videoContainer.classList.add('control-active');
-            if (controlCanvas) {
-                controlCanvas.style.pointerEvents = 'auto';
-                controlCanvas.style.cursor = 'crosshair';
-            }
-            
+
             // Configure canvas position and size
             this.resizeCanvas();
-            
+
             // Ensure canvas is in front
             controlCanvas.style.zIndex = '100';
-            
+
             // Focus the canvas to capture keyboard events
             controlCanvas.focus();
-            
+
             this.showNotification('Remote control enabled', 'info');
             this.log('Remote control enabled', 'info');
         } else {
-            if (btn) btn.textContent = 'Enable Control';
+            if (btn) btn.innerHTML = '<span class="ic">🎮</span> Управление';
             if (btn) btn.classList.remove('active');
             if (toggleBtn) toggleBtn.classList.remove('active');
             if (headerBtn) headerBtn.classList.remove('active');
             if (videoContainer) videoContainer.classList.remove('control-active');
-            if (controlCanvas) {
-                controlCanvas.style.pointerEvents = 'none';
-                controlCanvas.style.cursor = 'default';
-            }
-            this.showNotification('Remote control disabled', 'info');
+            this.showNotification('View mode — wheel zooms, drag pans', 'info');
         }
+        this.updateCanvasInteractivity();
     }
     
     handleMouseMove(event) {
-        if (!this.state.controlling) return;
+        // View mode: drag pans the zoomed picture.
+        if (!this.state.controlling) { this.panMove(event); return; }
 
         const coords = this.eventCoords(event);
         if (!coords) return;
@@ -1993,7 +2039,8 @@ class RemoteDesktopApp {
     }
 
     handleMouseDown(event) {
-        if (!this.state.controlling) return;
+        // View mode: press starts panning (only useful when zoomed).
+        if (!this.state.controlling) { this.beginPan(event); return; }
 
         const coords = this.eventCoords(event);
         if (!coords) return;
@@ -2006,7 +2053,8 @@ class RemoteDesktopApp {
     }
 
     handleMouseUp(event) {
-        if (!this.state.controlling) return;
+        // View mode: release ends panning.
+        if (!this.state.controlling) { this.endPan(); return; }
 
         const coords = this.eventCoords(event);
         if (!coords) return;
@@ -2016,7 +2064,13 @@ class RemoteDesktopApp {
     }
 
     handleWheel(event) {
-        if (!this.state.controlling) return;
+        // View mode: wheel zooms the picture (1x-3x, anchored at cursor).
+        if (!this.state.controlling) {
+            event.preventDefault();
+            const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+            this.zoomAt(event.clientX, event.clientY, factor);
+            return;
+        }
 
         event.preventDefault();
         const coords = this.eventCoords(event);
@@ -2024,11 +2078,114 @@ class RemoteDesktopApp {
 
         this.sendControlCommand('wheel', { x: coords.x, y: coords.y, deltaY: event.deltaY });
     }
+
+    // ---- Viewer zoom: view mode only (no remote input there) ----
+    // Wheel zooms 1x-3x anchored at the cursor, drag pans with clamping.
+    zoomLayer() { return document.getElementById('zoomLayer'); }
+
+    zoomContainerBox() {
+        const layer = this.zoomLayer();
+        const parent = layer ? layer.parentElement : null; // .video-wrapper
+        if (!parent) return null;
+        const r = parent.getBoundingClientRect();
+        if (!r.width || !r.height) return null;
+        return r;
+    }
+
+    applyZoom() {
+        const layer = this.zoomLayer();
+        if (layer) {
+            layer.style.transform =
+                `translate(${this.zoom.tx}px, ${this.zoom.ty}px) scale(${this.zoom.s})`;
+        }
+        const badge = document.getElementById('zoomBadge');
+        if (badge) {
+            badge.textContent = `⌕ ${Math.round(this.zoom.s * 100)}%`;
+            badge.classList.toggle('hidden', this.zoom.s <= 1.01);
+        }
+        this.updateCanvasInteractivity();
+    }
+
+    clampPan() {
+        const box = this.zoomContainerBox();
+        if (!box) return;
+        const s = this.zoom.s;
+        // Transformed content is box*s; keep it covering the box.
+        this.zoom.tx = Math.min(0, Math.max(box.width * (1 - s), this.zoom.tx));
+        this.zoom.ty = Math.min(0, Math.max(box.height * (1 - s), this.zoom.ty));
+        if (s <= 1.01) { this.zoom.tx = 0; this.zoom.ty = 0; }
+    }
+
+    zoomAt(clientX, clientY, factor) {
+        if (this.state.controlling || this.state.role !== 'client') return;
+        const box = this.zoomContainerBox();
+        if (!box) return;
+        const s = Math.min(this.zoomMax, Math.max(1, this.zoom.s * factor));
+        if (s === this.zoom.s) return;
+        // Keep the point under the cursor fixed: t' = c - (s'/s)(c - t).
+        const cx = clientX - box.left, cy = clientY - box.top;
+        const k = s / this.zoom.s;
+        this.zoom.tx = cx - k * (cx - this.zoom.tx);
+        this.zoom.ty = cy - k * (cy - this.zoom.ty);
+        this.zoom.s = s;
+        this.clampPan();
+        this.applyZoom();
+    }
+
+    resetZoom() {
+        if (this.zoom.s === 1 && !this.zoom.tx && !this.zoom.ty && !this._panning) return;
+        this.zoom.s = 1; this.zoom.tx = 0; this.zoom.ty = 0;
+        this._panning = null;
+        this.applyZoom();
+    }
+
+    beginPan(e) {
+        if (this.state.controlling || this.state.role !== 'client') return;
+        if (this.zoom.s <= 1.01 || typeof e.clientX !== 'number') return;
+        this._panning = { x: e.clientX, y: e.clientY };
+        const canvas = document.getElementById('controlCanvas');
+        if (canvas) canvas.style.cursor = 'grabbing';
+    }
+
+    panMove(e) {
+        if (!this._panning || typeof e.clientX !== 'number') return;
+        this.zoom.tx += e.clientX - this._panning.x;
+        this.zoom.ty += e.clientY - this._panning.y;
+        this._panning = { x: e.clientX, y: e.clientY };
+        this.clampPan();
+        this.applyZoom();
+    }
+
+    endPan() {
+        if (!this._panning) return;
+        this._panning = null;
+        const canvas = document.getElementById('controlCanvas');
+        if (canvas && !this.state.controlling) canvas.style.cursor = 'grab';
+    }
+
+    // Canvas interactivity follows the mode: control → crosshair remote
+    // input; connected viewing → zoom/pan surface; otherwise inert.
+    updateCanvasInteractivity() {
+        const canvas = document.getElementById('controlCanvas');
+        if (!canvas) return;
+        if (this.state.controlling) {
+            canvas.style.pointerEvents = 'auto';
+            canvas.style.cursor = 'crosshair';
+        } else if (this.state.role === 'client' && this.connectedPeerId) {
+            canvas.style.pointerEvents = 'auto';
+            canvas.style.cursor = this.zoom.s > 1.01 ? 'grab' : 'default';
+        } else {
+            canvas.style.pointerEvents = 'none';
+            canvas.style.cursor = 'default';
+        }
+    }
     
     sendControlCommand(type, data) {
         // Send via WebSocket instead of data channel for more reliability.
         // targetId lets the server route input to the right host and run
         // RobotJS only when that host IS the server machine.
+        // View-only servers (and view mode) never get here, belt and braces.
+        if (!this.serverControlEnabled || !this.state.controlling) return;
         this.sendMessage({
             type: 'control',
             action: type,
@@ -2471,6 +2628,11 @@ class RemoteDesktopApp {
     
     closePeerConnection() {
         clearTimeout(this._fallbackTimer);
+        // Session over: drop zoom, forget the peer, park the canvas.
+        this.resetZoom();
+        this.connectedPeerId = null;
+        this._panning = null;
+        this.updateCanvasInteractivity();
         // Tell host to stop relay (no-op if WebRTC-only session).
         if (this.fallback.active && this.state.role === 'client') {
             this.stopFallbackView(true);
@@ -2541,6 +2703,8 @@ class RemoteDesktopApp {
         }
         this.connectedPeerId = data.hostId;
         this.setupPeerConnection();
+        // Connected viewing: canvas becomes the zoom/pan surface.
+        this.updateCanvasInteractivity();
     }
 
     // Handle client joined (when a client connects to the host)
@@ -2559,7 +2723,14 @@ class RemoteDesktopApp {
     }
     
     handleTouchStart(event) {
-        if (!this.state.controlling) return;
+        // View mode: single-finger drag pans the zoomed picture.
+        if (!this.state.controlling) {
+            if (event.touches && event.touches.length === 1) {
+                event.preventDefault();
+                this.beginPan(event.touches[0]);
+            }
+            return;
+        }
         event.preventDefault();
 
         const coords = this.eventCoords(event);
@@ -2570,7 +2741,14 @@ class RemoteDesktopApp {
     }
 
     handleTouchMove(event) {
-        if (!this.state.controlling) return;
+        // View mode: single-finger drag pans the zoomed picture.
+        if (!this.state.controlling) {
+            if (event.touches && event.touches.length === 1) {
+                event.preventDefault();
+                this.panMove(event.touches[0]);
+            }
+            return;
+        }
         event.preventDefault();
 
         const coords = this.eventCoords(event);
@@ -2582,7 +2760,8 @@ class RemoteDesktopApp {
     }
 
     handleTouchEnd(event) {
-        if (!this.state.controlling) return;
+        // View mode: finger lift ends panning.
+        if (!this.state.controlling) { this.endPan(); return; }
         event.preventDefault();
 
         const coords = this.eventCoords(event);

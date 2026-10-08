@@ -55,7 +55,7 @@ function parseIni(text) {
 const DEFAULT_CONFIG_TEXT = `; Remote Desktop Server configuration
 ; Lines starting with ; or # are comments.
 ; Precedence: environment variables > this file > built-in defaults.
-; Env overrides: PORT, HOST, SSL_KEY, SSL_CERT, SSL_NO_AUTO, CONFIG (custom path).
+; Env overrides: PORT, HOST, SSL_KEY, SSL_CERT, SSL_NO_AUTO, ALLOW_CONTROL, CONFIG (custom path).
 
 [server]
 ; TCP port to listen on
@@ -64,6 +64,9 @@ port = 9000
 ; A pinned IP is the ONLY advertised address, the ONLY listened interface,
 ; and the ONLY name on the auto-generated certificate.
 host = 0.0.0.0
+; Master switch for remote control (1 = allow, 0 = view-only server:
+; control packets are dropped and clients hide all control UI).
+allow_control = 1
 ; Verbose logging (1 = full chatter: WS messages, ICE, HTTP hits, keys).
 ; Warnings and errors always print.
 verbose = 0
@@ -126,11 +129,17 @@ function loadConfig() {
         sslNoAuto: ['1', 'true', 'yes', 'on'].includes(
             String(process.env.SSL_NO_AUTO || ssl.no_auto || '0').toLowerCase()),
         verbose: ['1', 'true', 'yes', 'on'].includes(
-            String(process.env.VERBOSE || srv.verbose || '0').toLowerCase())
+            String(process.env.VERBOSE || srv.verbose || '0').toLowerCase()),
+        // Master kill-switch for remote control (view-only server when off).
+        allowControl: !['0', 'false', 'no', 'off'].includes(
+            String(process.env.ALLOW_CONTROL || srv.allow_control || '1').toLowerCase())
     };
 }
 const CONFIG = loadConfig();
 console.log(`⚙️  Config: ${CONFIG.path} (port=${CONFIG.port}, host=${CONFIG.host})`);
+console.log(CONFIG.allowControl
+    ? '🎮 Remote control ENABLED'
+    : '👁  Remote control DISABLED by config - view-only server');
 
 // Verbose-only logging for high-frequency/routine chatter (candidates,
 // HTTP hits, per-key events). Warnings and errors always print.
@@ -515,6 +524,8 @@ function processEventQueue(client) {
 function handleBinaryMouseMove(client, data) {
     // Only process if client role is correct
     if (client.role !== 'client') return;
+    // View-only server: drop all remote input at the gate.
+    if (!CONFIG.allowControl) return;
     
     // Performance optimization: UDP-style delivery (drop if too frequent)
     const now = Date.now();
@@ -679,7 +690,9 @@ function handleRegister(client, data) {
         type: 'registered',
         clientId: client.id,
         role: client.role,
-        ip: normIp(client.ip)
+        ip: normIp(client.ip),
+        // Global control kill-switch: clients hide all control UI when false.
+        allowControl: CONFIG.allowControl
     });
 }
 
@@ -868,6 +881,11 @@ function toScreenPixels(frac, max) {
 
 function handleControl(client, data) {
     if (client.role !== 'client') return;
+    // View-only server: drop all remote input at the gate.
+    if (!CONFIG.allowControl) {
+        vlog(`[Client ${client.id}] Control dropped (allow_control=0)`);
+        return;
+    }
 
     // mousemove/wheel arrive dozens per second - don't spam the log.
     if (data.action !== 'mousemove' && data.action !== 'wheel') {
