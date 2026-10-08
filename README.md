@@ -47,13 +47,27 @@ allow_control = 1    ; 0 = сервер только для просмотра: 
                      ; отбрасываются, клиенты прячут весь UI управления
 verbose = 0          ; 1 = подробные логи (WS, ICE, HTTP, клавиши)
 
+[video]
+width = 1920         ; запрос захвата хоста (ideal — браузер может взять ниже)
+height = 1080
+fps = 30
+
+[fallback]           ; WS-релей (MJPEG), когда WebRTC у вьюера заблокирован
+fps = 5              ; меньше fps/width/quality = меньше CPU хоста и трафика
+width = 1280
+quality = 0.6        ; 0.1–1.0
+watchdog_ms = 8000   ; тишина ICE перед запросом релея, миллисекунды
+```
+
 [ssl]
 key = ssl/key.pem
 cert = ssl/cert.pem
 no_auto = 0          ; 1 = без автогенерации, чистый HTTP (шаринг только via localhost)
 ```
 
-Приоритет: переменные окружения (`PORT`, `HOST`, `SSL_KEY`, `SSL_CERT`, `SSL_NO_AUTO`, `ALLOW_CONTROL`, `VERBOSE`, `CONFIG`) → `config.ini` → дефолты.
+Приоритет: переменные окружения (`PORT`, `HOST`, `ALLOW_CONTROL`, `VERBOSE`, `SSL_KEY`, `SSL_CERT`, `SSL_NO_AUTO`, `VIDEO_WIDTH`, `VIDEO_HEIGHT`, `VIDEO_FPS`, `FALLBACK_FPS`, `FALLBACK_WIDTH`, `FALLBACK_QUALITY`, `FALLBACK_WATCHDOG_MS`, `CONFIG`) → `config.ini` → дефолты.
+
+Настройки `[video]`/`[fallback]` сервер рассылает клиентам в сообщении `registered` — хост и вьюеры применяют их автоматически (захват, релей, watchdog). Некорректные значения клампятся к допустимым диапазонам, а не роняют захват.
 
 ## HTTPS и LAN
 

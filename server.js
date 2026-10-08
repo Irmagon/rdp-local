@@ -55,7 +55,11 @@ function parseIni(text) {
 const DEFAULT_CONFIG_TEXT = `; Remote Desktop Server configuration
 ; Lines starting with ; or # are comments.
 ; Precedence: environment variables > this file > built-in defaults.
-; Env overrides: PORT, HOST, SSL_KEY, SSL_CERT, SSL_NO_AUTO, ALLOW_CONTROL, CONFIG (custom path).
+; Env overrides: PORT, HOST, ALLOW_CONTROL, VERBOSE,
+;   SSL_KEY, SSL_CERT, SSL_NO_AUTO,
+;   VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS,
+;   FALLBACK_FPS, FALLBACK_WIDTH, FALLBACK_QUALITY, FALLBACK_WATCHDOG_MS,
+;   CONFIG (custom path).
 
 [server]
 ; TCP port to listen on
@@ -70,6 +74,22 @@ allow_control = 1
 ; Verbose logging (1 = full chatter: WS messages, ICE, HTTP hits, keys).
 ; Warnings and errors always print.
 verbose = 0
+
+[video]
+; Capture request for getDisplayMedia on the host (ideal values —
+; the browser may settle lower if the screen/source cannot provide them).
+width = 1920
+height = 1080
+fps = 30
+
+[fallback]
+; WS-relay (MJPEG) used when a viewer's WebRTC ICE is blocked.
+; Lower fps/width/quality = less host CPU and traffic.
+fps = 5
+width = 1280
+quality = 0.6
+; ICE silence before the viewer asks for relay, milliseconds.
+watchdog_ms = 8000
 
 [ssl]
 ; Paths to TLS key/cert (absolute or relative to the server directory).
@@ -118,8 +138,18 @@ function loadConfig() {
     }
     const srv = ini.server || {};
     const ssl = ini.ssl || {};
+    const vid = ini.video || {};
+    const fb = ini.fallback || {};
     // Writable-relative paths resolve against DATA_DIR (exe-adjacent under pkg).
     const resolvePath = (p) => (path.isAbsolute(p) ? p : path.join(DATA_DIR, p));
+    // Clamped number: garbage/empty config values fall back to defaults
+    // instead of breaking capture or flooding the host.
+    const num = (v, def, min, max) => {
+        const n = parseFloat(v);
+        if (!Number.isFinite(n)) return def;
+        return Math.min(max, Math.max(min, n));
+    };
+    const round = (v, def, min, max) => Math.round(num(v, def, min, max));
     return {
         path: cfgPath,
         port: parseInt(process.env.PORT || srv.port || '9000', 10) || 9000,
@@ -132,11 +162,25 @@ function loadConfig() {
             String(process.env.VERBOSE || srv.verbose || '0').toLowerCase()),
         // Master kill-switch for remote control (view-only server when off).
         allowControl: !['0', 'false', 'no', 'off'].includes(
-            String(process.env.ALLOW_CONTROL || srv.allow_control || '1').toLowerCase())
+            String(process.env.ALLOW_CONTROL || srv.allow_control || '1').toLowerCase()),
+        // Capture request pushed to all hosts (getDisplayMedia ideals).
+        video: {
+            width: round(process.env.VIDEO_WIDTH || vid.width || '1920', 1920, 320, 7680),
+            height: round(process.env.VIDEO_HEIGHT || vid.height || '1080', 1080, 240, 4320),
+            fps: round(process.env.VIDEO_FPS || vid.fps || '30', 30, 5, 60)
+        },
+        // WS-relay (MJPEG) parameters pushed to hosts/viewers.
+        fallback: {
+            fps: round(process.env.FALLBACK_FPS || fb.fps || '5', 5, 1, 15),
+            width: round(process.env.FALLBACK_WIDTH || fb.width || '1280', 1280, 320, 3840),
+            quality: num(process.env.FALLBACK_QUALITY || fb.quality || '0.6', 0.6, 0.1, 1),
+            watchdogMs: round(process.env.FALLBACK_WATCHDOG_MS || fb.watchdog_ms || '8000', 8000, 1000, 60000)
+        }
     };
 }
 const CONFIG = loadConfig();
 console.log(`⚙️  Config: ${CONFIG.path} (port=${CONFIG.port}, host=${CONFIG.host})`);
+console.log(`🎥 Capture ${CONFIG.video.width}x${CONFIG.video.height}@${CONFIG.video.fps}fps, relay ${CONFIG.fallback.width}px@${CONFIG.fallback.fps}fps q=${CONFIG.fallback.quality} (watchdog ${CONFIG.fallback.watchdogMs}ms)`);
 console.log(CONFIG.allowControl
     ? '🎮 Remote control ENABLED'
     : '👁  Remote control DISABLED by config - view-only server');
@@ -692,7 +736,9 @@ function handleRegister(client, data) {
         role: client.role,
         ip: normIp(client.ip),
         // Global control kill-switch: clients hide all control UI when false.
-        allowControl: CONFIG.allowControl
+        allowControl: CONFIG.allowControl,
+        // Tunable streaming settings from config.ini ([video]/[fallback]).
+        settings: { video: CONFIG.video, fallback: CONFIG.fallback }
     });
 }
 

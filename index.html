@@ -1307,8 +1307,37 @@ class RemoteDesktopApp {
         if (!this.serverControlEnabled) {
             this.log('Server runs view-only (allow_control=0) — control UI hidden', 'info');
         }
+        // Tunable streaming settings from the server ([video]/[fallback] in
+        // config.ini). Register arrives before any share/connect, so this
+        // always lands before first use. Old servers send no settings —
+        // built-in defaults below then stay in effect.
+        this.applyServerSettings(data.settings);
         this.applyControlAvailability();
         this.log(`Registered with ID: ${data.clientId}, IP: ${data.ip || 'n/a'}`, 'info');
+    }
+
+    applyServerSettings(settings) {
+        if (!settings) return;
+        const clamp = (v, def, min, max) => {
+            v = Number(v);
+            return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
+        };
+        const sv = settings.video;
+        if (sv) {
+            this.config.constraints.video = {
+                width: { ideal: Math.round(clamp(sv.width, 1920, 320, 7680)) },
+                height: { ideal: Math.round(clamp(sv.height, 1080, 240, 4320)) },
+                frameRate: { ideal: Math.round(clamp(sv.fps, 30, 5, 60)) }
+            };
+            this.log(`Capture settings from server: ${this.config.constraints.video.width.ideal}x${this.config.constraints.video.height.ideal}@${this.config.constraints.video.frameRate.ideal}fps`, 'info');
+        }
+        const sf = settings.fallback;
+        if (sf) {
+            this.config.fallbackFps = Math.round(clamp(sf.fps, 5, 1, 15));
+            this.config.fallbackWidth = Math.round(clamp(sf.width, 1280, 320, 3840));
+            this.config.fallbackQuality = clamp(sf.quality, 0.6, 0.1, 1);
+            this.config.fallbackWatchdogMs = Math.round(clamp(sf.watchdogMs, 8000, 1000, 60000));
+        }
     }
 
     // Remote control is possible only when the target host runs on the
