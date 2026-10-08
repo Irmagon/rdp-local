@@ -55,7 +55,7 @@ function parseIni(text) {
 const DEFAULT_CONFIG_TEXT = `; Remote Desktop Server configuration
 ; Lines starting with ; or # are comments.
 ; Precedence: environment variables > this file > built-in defaults.
-; Env overrides: PORT, HOST, ALLOW_CONTROL, VERBOSE,
+; Env overrides: PORT, HOST, ALLOW_CONTROL, AUTOSHARE, VERBOSE,
 ;   SSL_KEY, SSL_CERT, SSL_NO_AUTO,
 ;   VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS,
 ;   FALLBACK_FPS, FALLBACK_WIDTH, FALLBACK_QUALITY, FALLBACK_WATCHDOG_MS,
@@ -71,6 +71,9 @@ host = 0.0.0.0
 ; Master switch for remote control (1 = allow, 0 = view-only server:
 ; control packets are dropped and clients hide all control UI).
 allow_control = 1
+; Kiosk mode for the host page (1 = clicking Host starts screen capture
+; at once, sidebar hidden, stop button + join link move to the header).
+autoshare = 0
 ; Verbose logging (1 = full chatter: WS messages, ICE, HTTP hits, keys).
 ; Warnings and errors always print.
 verbose = 0
@@ -163,6 +166,9 @@ function loadConfig() {
         // Master kill-switch for remote control (view-only server when off).
         allowControl: !['0', 'false', 'no', 'off'].includes(
             String(process.env.ALLOW_CONTROL || srv.allow_control || '1').toLowerCase()),
+        // Kiosk mode: Host role starts capture immediately, no sidebar.
+        autoshare: ['1', 'true', 'yes', 'on'].includes(
+            String(process.env.AUTOSHARE || srv.autoshare || '0').toLowerCase()),
         // Capture request pushed to all hosts (getDisplayMedia ideals).
         video: {
             width: round(process.env.VIDEO_WIDTH || vid.width || '1920', 1920, 320, 7680),
@@ -267,6 +273,14 @@ const USE_HTTPS = !!TLS_OPTIONS;
 if (USE_HTTPS) {
     console.log('🔒 TLS certificates found - serving HTTPS (LAN screen sharing enabled)');
 }
+
+// Primary join URL for viewer deep links (?host=N): pinned host IP,
+// else the first LAN address (localhost is useless to other machines).
+const JOIN_BASE = (() => {
+    const ip = (HOST && HOST !== '0.0.0.0') ? HOST : (getLocalIPs()[0] || 'localhost');
+    return `${USE_HTTPS ? 'https' : 'http'}://${ip}:${PORT}`;
+})();
+console.log(`🔗 Viewer join base: ${JOIN_BASE}/?host=<id>`);
 
 // Create HTTP(S) server to serve static files
 const requestHandler = (req, res) => {
@@ -744,6 +758,10 @@ function handleRegister(client, data) {
         ip: normIp(client.ip),
         // Global control kill-switch: clients hide all control UI when false.
         allowControl: CONFIG.allowControl,
+        // Kiosk mode for the host page (autostart capture, no sidebar).
+        autoshare: CONFIG.autoshare,
+        // Base URL for viewer deep links (?host=N) shown in the header.
+        joinBase: JOIN_BASE,
         // Tunable streaming settings from config.ini ([video]/[fallback]).
         settings: { video: CONFIG.video, fallback: CONFIG.fallback }
     });

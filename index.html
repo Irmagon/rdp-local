@@ -329,6 +329,24 @@ body.no-control #controlInstructions {
     pointer-events: none;
 }
 
+/* Autoshare header: join link + stop button, visible while hosting. */
+#headerShareWrap {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+#headerShareWrap.hidden { display: none; }
+#headerJoinLink {
+    width: 220px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--primary);
+    border-radius: 8px;
+    color: #fff;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.5rem;
+    cursor: copy;
+}
+
 #fallbackImg.hidden {
     display: none;
 }
@@ -779,6 +797,14 @@ body.no-control #controlInstructions {
                 </div>
             </div>
             <div class="header-controls">
+                <div id="headerShareWrap" class="hidden">
+                    <input type="text" id="headerJoinLink" readonly
+                        title="Ссылка для подключения — клик копирует"
+                        placeholder="Ссылка для вьюеров…">
+                    <button class="header-control-btn" id="headerStopShareBtn" title="Остановить показ">
+                        <span class="ic">■</span>
+                    </button>
+                </div>
                 <button class="header-control-btn" id="headerFullscreenBtn" title="Fullscreen">
                     <span class="ic">⤢</span>
                 </button>
@@ -1057,6 +1083,13 @@ class RemoteDesktopApp {
         this.zoomMax = 3;
         this._panning = null;
 
+        // Deep-link auto-join: ?host=N opens the page as a viewer and
+        // connects to that host as soon as it appears in the host list.
+        this._autoHost = (() => {
+            try { return new URLSearchParams(window.location.search).get('host'); }
+            catch (e) { return null; }
+        })();
+
         this.init();
     }
     
@@ -1168,6 +1201,18 @@ class RemoteDesktopApp {
         
         // Header control buttons
         document.getElementById('headerFullscreenBtn')?.addEventListener('click', () => this.toggleFullscreen());
+        document.getElementById('headerStopShareBtn')?.addEventListener('click', () => this.stopScreenShare());
+        // Join link: click selects it and copies to clipboard when available.
+        document.getElementById('headerJoinLink')?.addEventListener('click', (e) => {
+            const inp = e.target;
+            inp.select();
+            try {
+                navigator.clipboard?.writeText(inp.value)?.then(
+                    () => this.showNotification('Ссылка скопирована', 'success'),
+                    () => {}
+                );
+            } catch (err) { /* clipboard unavailable — selection is enough */ }
+        });
         document.getElementById('headerPipBtn')?.addEventListener('click', () => this.togglePiP());
         document.getElementById('headerScreenshotBtn')?.addEventListener('click', () => this.takeScreenshot());
         document.getElementById('headerRecordBtn')?.addEventListener('click', () => this.toggleRecording());
@@ -1198,16 +1243,29 @@ class RemoteDesktopApp {
     selectRole(role) {
         this.state.role = role;
         document.getElementById('roleSelection').classList.add('hidden');
-        
+
         if (role === 'host') {
             document.getElementById('hostPanel').style.display = 'block';
         } else {
             document.getElementById('clientPanel').style.display = 'block';
         }
-        
+
         this.connectWebSocket();
         this.showNotification(`Selected role: ${role}`, 'info');
         this.log(`Role selected: ${role}`, 'info');
+    }
+
+    // Back to the role cards (autoshare: after stop or failed/cancelled
+    // capture — there is no host panel to fall back to).
+    backToRoles() {
+        this.state.role = null;
+        this.state.streaming = false;
+        document.getElementById('roleSelection')?.classList.remove('hidden');
+        document.getElementById('hostPanel').style.display = 'none';
+        document.getElementById('clientPanel').style.display = 'none';
+        document.getElementById('leftSidebar').style.display = '';
+        document.getElementById('headerShareWrap')?.classList.add('hidden');
+        this.updateStatus('Connected', true);
     }
     
     async connectWebSocket() {
@@ -1216,7 +1274,9 @@ class RemoteDesktopApp {
             
             this.connection.ws.onopen = () => {
                 this.updateStatus('Connected', true);
-                this.sendMessage({ type: 'register', role: this.state.role });
+                // Deep-link (?host=N) visitors register as viewers right away,
+                // otherwise the server never sends them the host list.
+                this.sendMessage({ type: 'register', role: this.state.role || (this._autoHost ? 'client' : null) });
             };
             
             this.connection.ws.onmessage = (event) => this.handleWebSocketMessage(event);
@@ -1309,6 +1369,18 @@ class RemoteDesktopApp {
             document.getElementById('sessionId').value = data.ip || data.clientId;
             document.getElementById('hostNumericId').textContent = `ID: ${data.clientId}`;
         }
+        // Numeric id doubles as the stream address for ?host=N deep links.
+        this.clientId = data.clientId;
+        // Kiosk mode from the server (autostart capture, no sidebar).
+        this.serverAutoshare = data.autoshare === true;
+        // Base URL for the header join link (server LAN address, not localhost).
+        this.joinBase = data.joinBase || '';
+        // Kiosk mode: the flag arrives with register, which is always before
+        // any share — an already-chosen Host starts capture at once.
+        if (this.state.role === 'host' && this.serverAutoshare) {
+            document.getElementById('leftSidebar').style.display = 'none';
+            this.startScreenShare();
+        }
         // Server-global control kill-switch (allow_control=0 in config.ini).
         this.serverControlEnabled = data.allowControl !== false;
         if (!this.serverControlEnabled) {
@@ -1378,6 +1450,14 @@ class RemoteDesktopApp {
     // Render viewer host list: "IP (ID: N)" options, keep current selection.
     // Hosts without a local server are marked view-only (no remote control).
     handleHostList(data) {
+        // Deep-link auto-join (?host=N): adopt the viewer role on first sight.
+        // (The socket already registered as viewer — see connectWebSocket.)
+        if (this.state.role === null && this._autoHost) {
+            this.state.role = 'client';
+            document.getElementById('roleSelection')?.classList.add('hidden');
+            document.getElementById('clientPanel').style.display = 'block';
+            this.log('Deep link: auto-joined as viewer', 'info');
+        }
         if (this.state.role !== 'client') return;
         const select = document.getElementById('hostSelect');
         if (!select) return;
@@ -1407,6 +1487,18 @@ class RemoteDesktopApp {
             }
         }
         this.trace(`[CLIENT] host list: ${hosts.map(h => `${h.ip}#${h.hostId}`).join(', ') || 'empty'}`, 'info');
+        // One-shot auto-connect to the deep-linked host (?host=N).
+        if (this._autoHost) {
+            const want = String(this._autoHost);
+            this._autoHost = null;
+            const opt = [...select.options].find(o => o.value === want);
+            if (opt) {
+                select.value = opt.value;
+                this.connect();
+            } else {
+                this.showNotification(`Host ${want} is not online`, 'warning');
+            }
+        }
     }
     
     // Screen sharing for host
@@ -1425,6 +1517,8 @@ class RemoteDesktopApp {
                 this.showLoading(false);
                 const startBtn = document.getElementById('startShareBtn');
                 if (startBtn) startBtn.disabled = false;
+                // Kiosk mode has no host panel to fall back to — back to roles.
+                if (this.serverAutoshare && this.state.role === 'host') this.backToRoles();
                 return;
             }
 
@@ -1445,6 +1539,12 @@ class RemoteDesktopApp {
             // element whose frames feed only the WS relay via drawImage.
             document.getElementById('localVideo').srcObject = this.connection.localStream;
             this.updateStatus('Sharing screen…', true);
+            // Header share UI: stop button + deep link for viewers.
+            if (this.joinBase && this.clientId != null) {
+                const link = document.getElementById('headerJoinLink');
+                if (link) link.value = `${this.joinBase}/?host=${this.clientId}`;
+            }
+            document.getElementById('headerShareWrap')?.classList.remove('hidden');
             
             this.connection.localStream.getVideoTracks()[0].onended = () => {
                 this.stopScreenShare();
@@ -1463,16 +1563,20 @@ class RemoteDesktopApp {
             this.showLoading(false);
             this.log(`Screen share error: ${error}`, 'error');
             this.showNotification('Failed to start screen share', 'error');
+            // Covers picker cancel in kiosk mode (no host panel to re-arm).
+            if (this.serverAutoshare && this.state.role === 'host') this.backToRoles();
         }
     }
     
     stopScreenShare() {
+        if (this.state.role !== 'host' || !this.state.streaming) return;
         if (this.connection.localStream) {
             this.connection.localStream.getTracks().forEach(track => track.stop());
             this.connection.localStream = null;
         }
-        
+
         document.getElementById('localVideo').srcObject = null;
+        document.getElementById('headerShareWrap')?.classList.add('hidden');
         this.updateStatus('Connected', true);
         
         document.getElementById('startShareBtn').disabled = false;
@@ -1484,6 +1588,9 @@ class RemoteDesktopApp {
 
         this.sendMessage({ type: 'host-stopped' });
         this.showNotification('Screen sharing stopped', 'info');
+
+        // Kiosk mode: sidebar is hidden, so return to the role cards.
+        if (this.serverAutoshare && this.state.role === 'host') this.backToRoles();
     }
 
     // ---- WS-relay fallback: MJPEG from localVideo, no WebRTC needed ----
