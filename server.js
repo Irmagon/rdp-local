@@ -314,7 +314,14 @@ const requestHandler = (req, res) => {
                 res.end(`Server error: ${error.code}`);
             }
         } else {
-            res.writeHead(200, { 'Content-Type': contentType });
+            // Never cache: index.html carries the whole app inline, and a
+            // stale cached copy looks exactly like "the fix didn't work".
+            res.writeHead(200, {
+                'Content-Type': contentType,
+                'Cache-Control': 'no-store, no-cache, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            });
             res.end(content, 'utf-8');
         }
     });
