@@ -1169,14 +1169,14 @@ class RemoteDesktopApp {
         this.setupKeyboardShortcuts();
         // Build tag in the tab title: instant staleness check
         // (old exe/cached page shows the old tag or none).
-        try { document.title += ' [view-zoom-1]'; } catch (e) {}
+        try { document.title += ' [view-zoom-2]'; } catch (e) {}
         // Deep link (?host=N): open the socket right away so the server
         // sends the host list; the viewer role is adopted when it arrives.
         // (Without this nothing connects until a role card is clicked.)
         if (this._autoHost) {
             this.connectWebSocket();
         }
-        this.log('Application initialized (build view-zoom-1: view/control modes, wheel zoom 1-3x + pan, no host preview/audio, allow_control, [video]/[fallback] config)', 'info');
+        this.log('Application initialized (build view-zoom-2: hosting UI watchdog + sync)', 'info');
     }
     
     setupEventListeners() {
@@ -1323,7 +1323,9 @@ class RemoteDesktopApp {
         document.getElementById('clientPanel').style.display = 'none';
         document.getElementById('leftSidebar').style.display = '';
         document.getElementById('headerShareWrap')?.classList.add('hidden');
+        document.getElementById('sharingOverlay')?.classList.add('hidden');
         document.body.classList.remove('kiosk');
+        this.stopHostingWatchdog();
         this.updateStatus('Connected', true);
     }
     
@@ -1613,6 +1615,7 @@ class RemoteDesktopApp {
             }
             document.getElementById('headerShareWrap')?.classList.remove('hidden');
             document.getElementById('sharingOverlay')?.classList.remove('hidden');
+            this.syncHostingUI();
             
             this.connection.localStream.getVideoTracks()[0].onended = () => {
                 this.stopScreenShare();
@@ -1623,6 +1626,7 @@ class RemoteDesktopApp {
             
             this.state.streaming = true;
             this.sendMessage({ type: 'host-ready' });
+            this.startHostingWatchdog();
             
             this.showLoading(false);
             this.setupPeerConnection();
@@ -1636,8 +1640,50 @@ class RemoteDesktopApp {
         }
     }
     
+    // Single source of truth for host share UI (header link/stop + center
+    // overlay). Reconciles visibility with actual streaming state — plus a
+    // watchdog interval, so any stray hide is repaired within 2 seconds
+    // (with a warning pinpointing that it happened).
+    syncHostingUI() {
+        const hosting = this.state.role === 'host' && this.state.streaming;
+        const wrap = document.getElementById('headerShareWrap');
+        const overlay = document.getElementById('sharingOverlay');
+        let fixed = false;
+        if (wrap && wrap.classList.contains('hidden') === hosting) {
+            wrap.classList.toggle('hidden', !hosting);
+            fixed = true;
+        }
+        if (overlay && overlay.classList.contains('hidden') === hosting) {
+            overlay.classList.toggle('hidden', !hosting);
+            fixed = true;
+        }
+        if (fixed) {
+            this.log(`Hosting UI re-synced (hosting=${hosting}) — something toggled it behind our back`, 'warn');
+        }
+        return hosting;
+    }
+
+    startHostingWatchdog() {
+        this.stopHostingWatchdog();
+        this._hostingWatchdog = setInterval(() => {
+            if (this.state.role === 'host' && this.state.streaming) {
+                this.syncHostingUI();
+            } else {
+                this.stopHostingWatchdog();
+            }
+        }, 2000);
+    }
+
+    stopHostingWatchdog() {
+        if (this._hostingWatchdog) {
+            clearInterval(this._hostingWatchdog);
+            this._hostingWatchdog = null;
+        }
+    }
+
     stopScreenShare() {
         if (this.state.role !== 'host' || !this.state.streaming) return;
+        this.stopHostingWatchdog();
         if (this.connection.localStream) {
             this.connection.localStream.getTracks().forEach(track => track.stop());
             this.connection.localStream = null;
