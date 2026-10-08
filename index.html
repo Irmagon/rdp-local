@@ -920,6 +920,10 @@ body.no-control #controlInstructions {
                                         <span class="stat-label">Resolution</span>
                                         <span class="stat-value" id="statResolution">-</span>
                                     </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Codec</span>
+                                        <span class="stat-value" id="statCodec">-</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1247,6 +1251,9 @@ class RemoteDesktopApp {
             case 'host-ready':
                 this.handleHostReady(data);
                 break;
+            case 'host-stopped':
+                this.handleHostStoppedSharing(data);
+                break;
             case 'host-available':
                 this.handleHostAvailable(data);
                 break;
@@ -1551,6 +1558,8 @@ class RemoteDesktopApp {
         this.showNotification('WebRTC blocked — relay mode (WS video)', 'info');
         this.sendMessage({ type: 'request-fallback', targetId: this.connectedPeerId });
         this.fallback.active = true;
+        // Stats panel shows relay numbers (resolution/fps) — needs the ticker.
+        this.startStatsMonitoring();
         this.fallback.frames = 0;
         this.fallback.lastFpsLog = Date.now();
         const img = document.getElementById('fallbackImg');
@@ -1568,11 +1577,18 @@ class RemoteDesktopApp {
             this.fallback.active = true;
             document.getElementById('fallbackImg')?.classList.remove('hidden');
             this.showLoading(false);
+            this.startStatsMonitoring();
         }
         const img = document.getElementById('fallbackImg');
         if (!img || !data.frame) return;
         img.src = data.frame;
         this.fallback.frames++;
+        // Cumulative counters for the stats panel (frames is reset by the
+        // 5s fps log above, so stats use their own totals).
+        this.fallback.totalFrames = (this.fallback.totalFrames || 0) + 1;
+        this.fallback.totalBytes = (this.fallback.totalBytes || 0) + data.frame.length;
+        this.fallback.lastW = data.w || 0;
+        this.fallback.lastH = data.h || 0;
         this.isConnecting = false;
         const now = Date.now();
         if (now - this.fallback.lastFpsLog > 5000) {
@@ -2375,25 +2391,62 @@ class RemoteDesktopApp {
     }
     
     async updateStats() {
+        // WS-relay session: no WebRTC inbound-rtp — report relay numbers
+        // (resolution/fps from the JPEG frames, bitrate measured).
+        if (this.state.role === 'client' && this.fallback.active) {
+            const now = Date.now();
+            if (!this.fallback.statT) {
+                this.fallback.statT = now;
+                this.fallback.statFrames = this.fallback.totalFrames || 0;
+                this.fallback.statBytes = this.fallback.totalBytes || 0;
+                return;
+            }
+            const dt = (now - this.fallback.statT) / 1000;
+            if (dt >= 1) {
+                const dFrames = (this.fallback.totalFrames || 0) - (this.fallback.statFrames || 0);
+                // dataURL is base64 (~4/3 overhead) — convert back to bytes.
+                const dBytes = ((this.fallback.totalBytes || 0) - (this.fallback.statBytes || 0)) * 0.75;
+                this.fallback.statT = now;
+                this.fallback.statFrames = this.fallback.totalFrames || 0;
+                this.fallback.statBytes = this.fallback.totalBytes || 0;
+                document.getElementById('statFps').textContent = `${(dFrames / dt).toFixed(1)} fps`;
+                document.getElementById('statBitrate').textContent = `${((dBytes * 8) / dt / 1000).toFixed(0)} kbps`;
+                document.getElementById('statResolution').textContent =
+                    this.fallback.lastW ? `${this.fallback.lastW}x${this.fallback.lastH}` : '-';
+                const codecEl = document.getElementById('statCodec');
+                if (codecEl) codecEl.textContent = 'MJPEG relay';
+                document.getElementById('statRtt').textContent = '-';
+            }
+            return;
+        }
         if (!this.connection.pc) return;
-        
+
         const stats = await this.connection.pc.getStats();
         let videoStats = null;
-        
+
         stats.forEach(report => {
             if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
                 videoStats = report;
             }
         });
-        
+
         if (videoStats) {
             const fps = videoStats.framesPerSecond || 0;
             const bitrate = this.calculateBitrate(videoStats.bytesReceived, videoStats.timestamp);
             const resolution = `${videoStats.frameWidth || 0}x${videoStats.frameHeight || 0}`;
-            
+            let codec = '-';
+            if (videoStats.codecId && typeof stats.get === 'function') {
+                const codecReport = stats.get(videoStats.codecId);
+                if (codecReport && codecReport.mimeType) {
+                    codec = String(codecReport.mimeType).replace(/^video\//i, '').toUpperCase();
+                }
+            }
+
             document.getElementById('statFps').textContent = `${fps} fps`;
             document.getElementById('statBitrate').textContent = `${bitrate} kbps`;
             document.getElementById('statResolution').textContent = resolution;
+            const codecEl = document.getElementById('statCodec');
+            if (codecEl) codecEl.textContent = codec;
         }
         
         // Get RTT
@@ -2662,6 +2715,16 @@ class RemoteDesktopApp {
         this.connectedPeerId = null;
         this._panning = null;
         this.updateCanvasInteractivity();
+        // Drop the last remote frame: ended tracks leave a frozen image.
+        if (this.state.role === 'client') {
+            const rv = document.getElementById('remoteVideo');
+            if (rv) rv.srcObject = null;
+            document.getElementById('fallbackImg')?.classList.add('hidden');
+            ['statFps', 'statBitrate', 'statRtt', 'statResolution', 'statCodec'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = '-';
+            });
+        }
         // Tell host to stop relay (no-op if WebRTC-only session).
         if (this.fallback.active && this.state.role === 'client') {
             this.stopFallbackView(true);
@@ -2693,6 +2756,22 @@ class RemoteDesktopApp {
         clearTimeout(this._connectTimeout);
     }
     
+    // The host stopped sharing: remote tracks just end, leaving the last
+    // frame frozen on screen. Clear it and park the session (the server
+    // broadcast already removed the host from viewer lists).
+    handleHostStoppedSharing(data) {
+        if (this.state.role !== 'client') return;
+        if (data.hostId && this.connectedPeerId && data.hostId !== this.connectedPeerId) return;
+        if (!this.connectedPeerId && !this.fallback.active) return;
+        this.log('Host stopped sharing — clearing viewer', 'info');
+        this.showNotification('Host stopped sharing', 'warning');
+        this.showLoading(false);
+        this.isConnecting = false;
+        clearTimeout(this._connectTimeout);
+        if (this.state.controlling) this.toggleControl();
+        this.closePeerConnection();
+    }
+
     // Handle host ready
     handleHostReady(data) {
         this.log('Host is ready to share', 'info');
