@@ -728,10 +728,12 @@ function handleRegister(client, data) {
     client.isLocal = isLocalAddress(client.ip);
 
     if (data.role === 'host') {
+        viewers.delete(client.id); // re-register (deep-link pre-connect) leaves no ghost
         hosts.set(client.id, client);
         console.log(`[Client ${client.id}] Registered as HOST from ${normIp(client.ip)} (hosts online: ${hosts.size})`);
         broadcastHostList();
     } else if (data.role === 'client') {
+        hosts.delete(client.id); // re-register (deep-link pre-connect) leaves no ghost
         viewers.set(client.id, client);
         console.log(`[Client ${client.id}] Registered as CLIENT (viewers online: ${viewers.size})`);
 

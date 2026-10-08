@@ -1119,6 +1119,12 @@ class RemoteDesktopApp {
     init() {
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
+        // Deep link (?host=N): open the socket right away so the server
+        // sends the host list; the viewer role is adopted when it arrives.
+        // (Without this nothing connects until a role card is clicked.)
+        if (this._autoHost) {
+            this.connectWebSocket();
+        }
         this.log('Application initialized (build view-zoom-1: view/control modes, wheel zoom 1-3x + pan, no host preview/audio, allow_control, [video]/[fallback] config)', 'info');
     }
     
@@ -1269,6 +1275,13 @@ class RemoteDesktopApp {
     }
     
     async connectWebSocket() {
+        // A live socket is reused (deep-link pre-connect + later manual role
+        // click must not open a second one) — just (re)register the role.
+        const live = this.connection.ws;
+        if (live && (live.readyState === WebSocket.OPEN || live.readyState === WebSocket.CONNECTING)) {
+            this.sendMessage({ type: 'register', role: this.state.role || (this._autoHost ? 'client' : null) });
+            return;
+        }
         try {
             this.connection.ws = new WebSocket(this.config.wsUrl);
             
