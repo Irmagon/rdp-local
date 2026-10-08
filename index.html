@@ -347,6 +347,31 @@ body.no-control #controlInstructions {
     cursor: copy;
 }
 
+/* Sharing overlay: centered badge on the host screen while streaming. */
+#sharingOverlay {
+    position: absolute;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.2rem;
+    background: rgba(0, 0, 0, 0.55);
+    user-select: none;
+}
+#sharingOverlay.hidden { display: none; }
+#sharingOverlay .sharing-title {
+    font-size: 1.8rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+#sharingOverlay #overlayStopBtn {
+    font-size: 1.1rem;
+    padding: 0.8rem 2.2rem;
+    border-radius: 12px;
+}
+
 /* Kiosk mode (autoshare host): header keeps ONLY the join link and a big
    stop button — every other header button is hidden. */
 body.kiosk .header-controls > :not(#headerShareWrap) {
@@ -985,6 +1010,12 @@ body.kiosk #headerJoinLink {
                         </div>
                         <div id="zoomBadge" class="hidden" title="Reset zoom">⌕ 100%</div>
 
+                        <!-- Sharing overlay: shown on the host screen while streaming. -->
+                        <div id="sharingOverlay" class="hidden">
+                            <div class="sharing-title">Идёт трансляция</div>
+                            <button class="btn btn-danger" id="overlayStopBtn">Остановить показ</button>
+                        </div>
+
                         <!-- Host capture source (invisible): keeps playing so the
                              WS relay can grab frames; the host gets no preview. -->
                         <video id="localVideo" class="capture-source" autoplay playsinline muted></video>
@@ -1154,6 +1185,7 @@ class RemoteDesktopApp {
         // Host controls
         document.getElementById('startShareBtn')?.addEventListener('click', () => this.startScreenShare());
         document.getElementById('stopShareBtn')?.addEventListener('click', () => this.stopScreenShare());
+        document.getElementById('overlayStopBtn')?.addEventListener('click', () => this.stopScreenShare());
         
         // Client controls
         document.getElementById('connectBtn')?.addEventListener('click', () => this.connect());
@@ -1577,6 +1609,7 @@ class RemoteDesktopApp {
                 if (link) link.value = `${this.joinBase}/?host=${this.clientId}`;
             }
             document.getElementById('headerShareWrap')?.classList.remove('hidden');
+            document.getElementById('sharingOverlay')?.classList.remove('hidden');
             
             this.connection.localStream.getVideoTracks()[0].onended = () => {
                 this.stopScreenShare();
@@ -1609,6 +1642,7 @@ class RemoteDesktopApp {
 
         document.getElementById('localVideo').srcObject = null;
         document.getElementById('headerShareWrap')?.classList.add('hidden');
+        document.getElementById('sharingOverlay')?.classList.add('hidden');
         this.updateStatus('Connected', true);
         
         document.getElementById('startShareBtn').disabled = false;
