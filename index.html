@@ -1167,6 +1167,9 @@ class RemoteDesktopApp {
     init() {
         this.setupEventListeners();
         this.setupKeyboardShortcuts();
+        // Build tag in the tab title: instant staleness check
+        // (old exe/cached page shows the old tag or none).
+        try { document.title += ' [view-zoom-1]'; } catch (e) {}
         // Deep link (?host=N): open the socket right away so the server
         // sends the host list; the viewer role is adopted when it arrives.
         // (Without this nothing connects until a role card is clicked.)
