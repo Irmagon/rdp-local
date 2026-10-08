@@ -287,10 +287,19 @@ const requestHandler = (req, res) => {
     // Print request info for debugging
     vlog(`Received request for: ${req.url} from ${req.socket.remoteAddress}`);
     
-    // Handle static file requests
-    let filePath = path.join(BASE_DIR, req.url);
-    if (req.url === '/' || req.url === '') {
+    // Handle static file requests. Strip query/hash: deep links like
+    // /?host=3 must serve index.html, not a file literally named "?host=3".
+    let urlPath = (req.url || '/').split('?')[0].split('#')[0];
+    try { urlPath = decodeURIComponent(urlPath); } catch (e) { /* keep raw */ }
+    let filePath = path.join(BASE_DIR, urlPath);
+    if (urlPath === '/' || urlPath === '') {
         filePath = path.join(BASE_DIR, 'index.html');
+    }
+    // Never escape the snapshot dir (e.g. /../config.ini).
+    if (path.relative(BASE_DIR, filePath).startsWith('..')) {
+        res.writeHead(403);
+        res.end('Forbidden');
+        return;
     }
     
     // Get the file extension
